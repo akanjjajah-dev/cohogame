@@ -116,6 +116,14 @@ export function speakCohoText(
   fallbackSpeech(phonetic || normalizeCohoForSpeech(text), slow, onStart, onEnd);
 }
 
+export function speakVietnameseText(
+  text: string,
+  options?: { slow?: boolean; onStart?: () => void; onEnd?: () => void }
+): void {
+  const { slow = false, onStart, onEnd } = options || {};
+  fallbackSpeech(text, slow, onStart, onEnd);
+}
+
 function fallbackSpeech(
   spokenText: string,
   slow: boolean,

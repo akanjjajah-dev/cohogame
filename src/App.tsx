@@ -12,17 +12,19 @@ import {
   VolumeX,
   Check,
   Pencil,
+  Search,
 } from 'lucide-react';
 import { LEVEL_METADATA, SEED_LESSONS } from './data/seedData';
 import { LessonItem, StudentProfile } from './shared/types';
 import { getSoundMuted, setSoundMuted, playTapSound } from './lib/audio';
 import { LearningPathView } from './components/LearningPathView';
+import { LookupView } from './components/LookupView';
 import { AlphabetView } from './components/AlphabetView';
 import { SkillPracticeView } from './components/SkillPracticeView';
 import { ExcelManagerView } from './components/ExcelManagerView';
 import { LessonPlayer } from './components/LessonPlayer';
 
-type NavTab = 'learn' | 'alphabet' | 'skills' | 'excel';
+type NavTab = 'learn' | 'lookup' | 'alphabet' | 'skills' | 'excel';
 
 const STUDENT_ID_KEY = 'coho_student_id';
 
@@ -169,11 +171,17 @@ export default function App() {
     }
   };
 
-  const navItems: { id: NavTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+  const navItems: {
+    id: NavTab;
+    label: string;
+    mobileLabel?: string;
+    icon: React.ComponentType<{ className?: string }>;
+  }[] = [
     { id: 'learn', label: 'Học tập', icon: Compass },
+    { id: 'lookup', label: 'Tra từ 2 chiều', mobileLabel: 'Tra từ', icon: Search },
     { id: 'alphabet', label: 'Chữ cái', icon: BookA },
     { id: 'skills', label: '4 Kỹ năng', icon: Sparkles },
-    { id: 'excel', label: 'Dữ liệu Excel', icon: FileSpreadsheet },
+    { id: 'excel', label: 'Dữ liệu Excel', mobileLabel: 'Excel', icon: FileSpreadsheet },
   ];
 
   // Active Lesson Full-Focus Mode
@@ -330,6 +338,7 @@ export default function App() {
                   onSelectLesson={(lesson) => setActiveLesson(lesson)}
                 />
               )}
+              {activeTab === 'lookup' && <LookupView lessons={lessons} />}
               {activeTab === 'alphabet' && <AlphabetView />}
               {activeTab === 'skills' && (
                 <SkillPracticeView
@@ -429,7 +438,7 @@ export default function App() {
       {/* Mobile Fixed Bottom Navigation Bar (<= 8% viewport height) */}
       <nav
         aria-label="Điều hướng di động"
-        className="lg:hidden fixed bottom-0 left-0 right-0 z-30 h-16 bg-white/95 backdrop-blur-md border-t border-stone-200 grid grid-cols-4 items-center px-1"
+        className="lg:hidden fixed bottom-0 left-0 right-0 z-30 h-16 bg-white/95 backdrop-blur-md border-t border-stone-200 grid grid-cols-5 items-center px-1"
       >
         {navItems.map((item) => {
           const Icon = item.icon;
@@ -447,7 +456,9 @@ export default function App() {
               }`}
             >
               <Icon className="w-5 h-5" />
-              <span className="text-[11px] leading-none whitespace-nowrap">{item.label}</span>
+              <span className="text-[11px] leading-none whitespace-nowrap">
+                {item.mobileLabel || item.label}
+              </span>
             </button>
           );
         })}
