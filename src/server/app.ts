@@ -1,6 +1,7 @@
 import express from 'express';
 import {
   getAllLessons,
+  getLeaderboard,
   getStudentProfile,
   importCurriculum,
   recordLessonCompletion,
@@ -107,6 +108,18 @@ export function createApp() {
     } catch (error) {
       console.error('Error completing lesson:', error);
       res.status(500).json({ error: 'Không thể lưu tiến độ học tập.' });
+    }
+  });
+
+  app.get('/api/leaderboard', async (req, res) => {
+    try {
+      const sortParam = req.query.sort === 'xp' ? 'xp' : 'score';
+      const limitParam = Number(req.query.limit) || 50;
+      const data = await getLeaderboard(limitParam, sortParam);
+      res.json(data);
+    } catch (error) {
+      console.error('Error getting leaderboard:', error);
+      res.status(500).json({ error: 'Không thể tải bảng xếp hạng.' });
     }
   });
 

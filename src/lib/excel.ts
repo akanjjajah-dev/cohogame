@@ -1,4 +1,5 @@
 import * as XLSX from 'xlsx';
+import type { DictionaryEntry } from '../data/seedData';
 import {
   DifficultyLevel,
   ExcelImportRow,
@@ -95,8 +96,25 @@ export async function parseExcelFile(file: File): Promise<ParsedExcelResult> {
     const typeRaw = getField(normalized, ['loai_bai_tap', 'exercise_type', 'type', 'dang_bai']);
     const exerciseType = parseExerciseType(typeRaw, skill, options.length);
 
-    const cohoText = getField(normalized, ['chu_co_ho', 'tieng_co_ho', 'coho_text', 'coho', 'tu_vung']);
-    const vietnameseText = getField(normalized, ['nghia_tieng_viet', 'tieng_viet', 'vietnamese_text', 'meaning', 'nghia']);
+    const cohoText = getField(normalized, [
+      'tieng_k_ho',
+      'tieng_koho',
+      'chu_k_ho',
+      'chu_co_ho',
+      'tieng_co_ho',
+      'coho_text',
+      'coho',
+      'k_ho',
+      'koho',
+      'tu_vung',
+    ]);
+    const vietnameseText = getField(normalized, [
+      'nghia_tieng_viet',
+      'tieng_viet',
+      'vietnamese_text',
+      'meaning',
+      'nghia',
+    ]);
     const prompt =
       getField(normalized, ['cau_hoi', 'prompt', 'question', 'yeu_cau']) ||
       (cohoText ? `Nhận biết và thực hành: "${cohoText}"` : '');
@@ -135,6 +153,89 @@ export async function parseExcelFile(file: File): Promise<ParsedExcelResult> {
   });
 
   return { rows, warnings };
+}
+
+export async function parseDictionaryExcelFile(file: File): Promise<{
+  entries: DictionaryEntry[];
+  warnings: string[];
+}> {
+  const buffer = await file.arrayBuffer();
+  const workbook = XLSX.read(buffer, { type: 'array' });
+  const firstSheetName = workbook.SheetNames[0];
+  if (!firstSheetName) {
+    return { entries: [], warnings: ['Tệp Excel không có trang tính (sheet) nào.'] };
+  }
+
+  const sheet = workbook.Sheets[firstSheetName];
+  const rawJson = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' });
+  const entries: DictionaryEntry[] = [];
+  const warnings: string[] = [];
+  const seen = new Set<string>();
+
+  rawJson.forEach((rawRow, idx) => {
+    const normalized: Record<string, string> = {};
+    const orderedVals: string[] = [];
+    for (const [k, v] of Object.entries(rawRow)) {
+      const str = String(v ?? '').trim();
+      normalized[normalizeKey(k)] = str;
+      orderedVals.push(str);
+    }
+
+    let coho = getField(normalized, [
+      'tieng_k_ho',
+      'tieng_koho',
+      'chu_k_ho',
+      'chu_co_ho',
+      'tieng_co_ho',
+      'coho_text',
+      'coho',
+      'k_ho',
+      'koho',
+      'tu_vung',
+    ]);
+    let vietnamese = getField(normalized, [
+      'nghia_tieng_viet',
+      'tieng_viet',
+      'vietnamese_text',
+      'meaning',
+      'nghia',
+    ]);
+
+    // Fallback: if 2-column sheet without recognized headers, use columns 1 & 2
+    if (!coho && !vietnamese && orderedVals.length >= 2) {
+      coho = orderedVals[0];
+      vietnamese = orderedVals[1];
+    }
+
+    if (!coho || !vietnamese) {
+      warnings.push(`Dòng ${idx + 2}: Thiếu từ tiếng K'Ho hoặc nghĩa tiếng Việt.`);
+      return;
+    }
+
+    const dedupeKey = `${coho.toLowerCase()}::${vietnamese.toLowerCase()}`;
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+
+    const levelNum = Number(getField(normalized, ['cap_do', 'level', 'cap']).replace(/[^0-9]/g, '')) || 2;
+    const level = Math.min(5, Math.max(1, levelNum)) as 1 | 2 | 3 | 4 | 5;
+
+    entries.push({
+      coho,
+      vietnamese,
+      category: 'daily',
+      level,
+      phonetic: getField(normalized, ['phien_am_goi_y', 'phien_am', 'phonetic', 'cach_doc']) || undefined,
+      partOfSpeech: getField(normalized, ['tu_loai', 'part_of_speech', 'loai_tu']) || undefined,
+      explanationVi: getField(normalized, ['giai_nghia_tieng_viet', 'giai_nghia', 'goi_y', 'hint']) || undefined,
+      explanationKoho: getField(normalized, ['giai_nghia_co_ho', 'ngu_canh_co_ho']) || undefined,
+      exampleKoho: getField(normalized, ['vi_du_co_ho', 'example_koho']) || undefined,
+      exampleVi: getField(normalized, ['vi_du_tieng_viet', 'example_vi']) || undefined,
+      audioUrl: getField(normalized, ['link_am_thanh', 'am_thanh', 'audio_url', 'audio']) || undefined,
+      source: 'user_excel_uploaded',
+    });
+  });
+
+  return { entries, warnings };
 }
 
 export function exportCurriculumToExcel(lessons: LessonItem[], filename = 'du_lieu_hoc_chu_co_ho.xlsx'): void {

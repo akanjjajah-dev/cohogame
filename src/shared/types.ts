@@ -87,3 +87,15 @@ export interface LevelMeta {
   badgeText: string;
   accentHex: string;
 }
+
+export interface LeaderboardEntry {
+  rank: number;
+  id: string;
+  displayName: string;
+  totalScore: number;
+  xp: number;
+  streak: number;
+  completedLessons: number;
+  averageScore: number;
+  lastActiveDate: string;
+}

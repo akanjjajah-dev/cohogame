@@ -10,7 +10,7 @@ import {
   Turtle,
   Volume2,
   X,
-  Star,
+  Award,
 } from 'lucide-react';
 import { ExerciseItem, LessonItem } from '../shared/types';
 import {
@@ -237,7 +237,6 @@ export const LessonPlayer: React.FC<LessonPlayerProps> = ({
   if (isFinished) {
     const total = Math.max(1, exercises.length);
     const accuracy = Math.round((correctCount / total) * 100);
-    const stars = accuracy >= 90 ? 3 : accuracy >= 70 ? 2 : 1;
     const earnedXp = Math.max(10, Math.round((lesson.xpReward * Math.max(50, accuracy)) / 100));
 
     return (
@@ -253,7 +252,7 @@ export const LessonPlayer: React.FC<LessonPlayerProps> = ({
                 className="w-full h-full object-cover"
               />
             ) : (
-              <Star className="w-14 h-14 text-amber-500 fill-amber-400" />
+              <Award className="w-14 h-14 text-amber-600" />
             )}
           </div>
 
@@ -264,15 +263,12 @@ export const LessonPlayer: React.FC<LessonPlayerProps> = ({
             <p className="text-sm text-stone-600">{lesson.title}</p>
           </div>
 
-          <div className="flex items-center justify-center gap-2">
-            {[1, 2, 3].map((idx) => (
-              <Star
-                key={idx}
-                className={`w-9 h-9 ${
-                  idx <= stars ? 'text-amber-500 fill-amber-400' : 'text-stone-200 fill-stone-100'
-                }`}
-              />
-            ))}
+          <div className="bg-stone-50 border border-stone-200 rounded-2xl p-4 space-y-1">
+            <div className="text-xs font-semibold text-stone-500">Điểm số đạt được</div>
+            <div className="text-4xl font-extrabold text-emerald-700 font-mono tabular-nums">
+              {accuracy}
+              <span className="text-lg font-bold text-stone-400"> / 100 điểm</span>
+            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -283,9 +279,9 @@ export const LessonPlayer: React.FC<LessonPlayerProps> = ({
               </div>
             </div>
             <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4">
-              <div className="text-xs font-semibold text-amber-800">Độ chính xác</div>
+              <div className="text-xs font-semibold text-amber-800">Số câu trả lời đúng</div>
               <div className="text-2xl font-extrabold text-amber-700 font-mono tabular-nums mt-1">
-                {accuracy}%
+                {correctCount}/{total}
               </div>
             </div>
           </div>

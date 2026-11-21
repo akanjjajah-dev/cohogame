@@ -6,6 +6,7 @@ import {
   DifficultyLevel,
   ExcelImportRow,
   ExerciseItem,
+  LeaderboardEntry,
   LessonItem,
   StudentProfile,
 } from '../shared/types.ts';
@@ -538,4 +539,92 @@ export async function recordLessonCompletion(params: {
   local.students[profile.id] = profile;
   writeLocalStore(local);
   return profile;
+}
+
+export async function getLeaderboard(
+  limit = 50,
+  sortBy: 'score' | 'xp' = 'score'
+): Promise<{ entries: LeaderboardEntry[]; storage: 'supabase' | 'local' }> {
+  const safeLimit = Math.max(1, Math.min(100, limit));
+  const pool = getPgPool();
+
+  if (pool) {
+    try {
+      await ensurePgSchemaAndSeed(pool);
+      const orderClause =
+        sortBy === 'xp'
+          ? 'sp.xp DESC, total_score DESC, sp.streak DESC, sp.updated_at ASC'
+          : 'total_score DESC, sp.xp DESC, sp.streak DESC, sp.updated_at ASC';
+
+      const result = await pool.query(
+        `SELECT
+           sp.id,
+           sp.display_name,
+           sp.xp,
+           sp.streak,
+           sp.last_active_date,
+           COALESCE(SUM(lp.best_score), 0)::int AS total_score,
+           COUNT(lp.lesson_id)::int AS completed_lessons
+         FROM student_profiles sp
+         LEFT JOIN lesson_progress lp ON lp.student_id = sp.id
+         GROUP BY sp.id, sp.display_name, sp.xp, sp.streak, sp.last_active_date, sp.updated_at
+         ORDER BY ${orderClause}
+         LIMIT $1`,
+        [safeLimit]
+      );
+
+      const entries: LeaderboardEntry[] = result.rows.map((row, idx) => {
+        const totalScore = Number(row.total_score) || 0;
+        const completedLessons = Number(row.completed_lessons) || 0;
+        return {
+          rank: idx + 1,
+          id: String(row.id),
+          displayName: String(row.display_name || 'Học sinh Cơ Ho'),
+          totalScore,
+          xp: Number(row.xp) || 0,
+          streak: Number(row.streak) || 1,
+          completedLessons,
+          averageScore: completedLessons > 0 ? Math.round(totalScore / completedLessons) : 0,
+          lastActiveDate: String(row.last_active_date || getTodayIso()),
+        };
+      });
+
+      return { entries, storage: 'supabase' };
+    } catch (err) {
+      console.error('Supabase leaderboard fetch failed, falling back to local:', err);
+    }
+  }
+
+  const local = readLocalStore();
+  const rows = Object.values(local.students).map((st) => {
+    const progList = Object.values(st.progress || {});
+    const totalScore = progList.reduce((sum, p) => sum + (p.bestScore ?? 0), 0);
+    const completedLessons = progList.filter(
+      (p) => (p.bestScore ?? 0) > 0 || Boolean(p.completedAt) || (p.stars ?? 0) > 0
+    ).length;
+    return {
+      id: st.id,
+      displayName: st.displayName || 'Học sinh Cơ Ho',
+      totalScore,
+      xp: st.xp || 0,
+      streak: st.streak || 1,
+      completedLessons,
+      averageScore: completedLessons > 0 ? Math.round(totalScore / completedLessons) : 0,
+      lastActiveDate: st.lastActiveDate || getTodayIso(),
+    };
+  });
+
+  rows.sort((a, b) => {
+    if (sortBy === 'xp') {
+      return b.xp - a.xp || b.totalScore - a.totalScore || b.streak - a.streak;
+    }
+    return b.totalScore - a.totalScore || b.xp - a.xp || b.streak - a.streak;
+  });
+
+  const entries: LeaderboardEntry[] = rows.slice(0, safeLimit).map((item, idx) => ({
+    rank: idx + 1,
+    ...item,
+  }));
+
+  return { entries, storage: 'local' };
 }

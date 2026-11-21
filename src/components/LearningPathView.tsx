@@ -2,7 +2,6 @@ import React, { useState } from 'react';
 import {
   CheckCircle2,
   Play,
-  Star,
   BookOpen,
   Award,
 } from 'lucide-react';
@@ -30,8 +29,13 @@ export const LearningPathView: React.FC<LearningPathViewProps> = ({
   );
 
   // Find the first uncompleted lesson as the recommended next step
+  const isLessonDone = (lessonId: string) => {
+    const p = profile.progress[lessonId];
+    return Boolean(p && ((p.bestScore ?? 0) > 0 || p.completedAt || (p.stars ?? 0) > 0));
+  };
+
   const nextRecommendedLesson =
-    lessons.find((l) => !profile.progress[l.id] || profile.progress[l.id].stars === 0) ||
+    lessons.find((l) => !isLessonDone(l.id)) ||
     lessons[0];
 
   return (
@@ -134,9 +138,7 @@ export const LearningPathView: React.FC<LearningPathViewProps> = ({
       <div className="space-y-8">
         {visibleLevels.map((meta) => {
           const levelLessons = lessons.filter((l) => l.level === meta.level);
-          const completedInLevel = levelLessons.filter(
-            (l) => (profile.progress[l.id]?.stars ?? 0) > 0
-          ).length;
+          const completedInLevel = levelLessons.filter((l) => isLessonDone(l.id)).length;
 
           return (
             <section key={meta.level} className="space-y-4">
@@ -163,8 +165,8 @@ export const LearningPathView: React.FC<LearningPathViewProps> = ({
                 <div className="space-y-3">
                   {levelLessons.map((lesson, idx) => {
                     const prog = profile.progress[lesson.id];
-                    const stars = prog?.stars ?? 0;
-                    const isCompleted = stars > 0;
+                    const bestScore = prog?.bestScore ?? 0;
+                    const isCompleted = isLessonDone(lesson.id);
                     const isNext = nextRecommendedLesson?.id === lesson.id;
 
                     // Gentle horizontal winding offset on wider screens
@@ -212,23 +214,25 @@ export const LearningPathView: React.FC<LearningPathViewProps> = ({
                             </h3>
                             <p className="text-xs sm:text-sm text-stone-600">{lesson.description}</p>
 
-                            {/* Stars & Explicit status text */}
-                            <div className="flex items-center gap-2 pt-1">
-                              <div className="flex items-center gap-0.5">
-                                {[1, 2, 3].map((s) => (
-                                  <Star
-                                    key={s}
-                                    className={`w-4 h-4 ${
-                                      s <= stars
-                                        ? 'text-amber-500 fill-amber-400'
-                                        : 'text-stone-200 fill-stone-100'
-                                    }`}
-                                  />
-                                ))}
-                              </div>
-                              <span className="text-xs font-semibold text-stone-500">
+                            {/* Numeric score & status text */}
+                            <div className="flex items-center gap-2 pt-1 text-xs">
+                              {isCompleted ? (
+                                <span className="font-mono font-bold tabular-nums text-amber-700">
+                                  Điểm: {bestScore}/100
+                                </span>
+                              ) : (
+                                <span className="font-mono font-semibold tabular-nums text-stone-400">
+                                  0/100 điểm
+                                </span>
+                              )}
+                              <span className="text-stone-300">·</span>
+                              <span className="font-semibold text-stone-500">
                                 {isCompleted
-                                  ? `Đã đạt ${prog.bestScore}%`
+                                  ? bestScore >= 90
+                                    ? 'Xuất sắc'
+                                    : bestScore >= 70
+                                      ? 'Khá tốt'
+                                      : 'Hoàn thành'
                                   : isNext
                                     ? 'Bài tiếp theo'
                                     : 'Sẵn sàng học'}

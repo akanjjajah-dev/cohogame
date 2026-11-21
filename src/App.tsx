@@ -21,10 +21,11 @@ import { LearningPathView } from './components/LearningPathView';
 import { LookupView } from './components/LookupView';
 import { AlphabetView } from './components/AlphabetView';
 import { SkillPracticeView } from './components/SkillPracticeView';
+import { LeaderboardView } from './components/LeaderboardView';
 import { ExcelManagerView } from './components/ExcelManagerView';
 import { LessonPlayer } from './components/LessonPlayer';
 
-type NavTab = 'learn' | 'lookup' | 'alphabet' | 'skills' | 'excel';
+type NavTab = 'learn' | 'lookup' | 'alphabet' | 'skills' | 'leaderboard' | 'excel';
 
 const STUDENT_ID_KEY = 'coho_student_id';
 
@@ -100,14 +101,10 @@ export default function App() {
     setSoundMuted(next);
   };
 
-  const handleSaveName = async () => {
-    const clean = nameInput.trim();
-    if (!clean) {
-      setIsEditingName(false);
-      return;
-    }
+  const saveDisplayName = async (rawName: string) => {
+    const clean = rawName.trim();
+    if (!clean) return;
     setProfile((prev) => ({ ...prev, displayName: clean }));
-    setIsEditingName(false);
     try {
       const res = await fetch(`/api/student/${encodeURIComponent(studentId)}`, {
         method: 'PUT',
@@ -121,6 +118,11 @@ export default function App() {
     } catch {
       // Ignore offline save failure
     }
+  };
+
+  const handleSaveName = async () => {
+    setIsEditingName(false);
+    await saveDisplayName(nameInput);
   };
 
   const handleLessonComplete = async (result: {
@@ -175,13 +177,15 @@ export default function App() {
     id: NavTab;
     label: string;
     mobileLabel?: string;
+    showInMobileBottom?: boolean;
     icon: React.ComponentType<{ className?: string }>;
   }[] = [
-    { id: 'learn', label: 'Học tập', icon: Compass },
-    { id: 'lookup', label: 'Tra từ 2 chiều', mobileLabel: 'Tra từ', icon: Search },
-    { id: 'alphabet', label: 'Chữ cái', icon: BookA },
-    { id: 'skills', label: '4 Kỹ năng', icon: Sparkles },
-    { id: 'excel', label: 'Dữ liệu Excel', mobileLabel: 'Excel', icon: FileSpreadsheet },
+    { id: 'learn', label: 'Học tập', showInMobileBottom: true, icon: Compass },
+    { id: 'lookup', label: 'Tra từ 2 chiều', mobileLabel: 'Tra từ', showInMobileBottom: true, icon: Search },
+    { id: 'alphabet', label: 'Chữ cái', showInMobileBottom: true, icon: BookA },
+    { id: 'skills', label: '4 Kỹ năng', showInMobileBottom: true, icon: Sparkles },
+    { id: 'leaderboard', label: 'Bảng xếp hạng', mobileLabel: 'Xếp hạng', showInMobileBottom: false, icon: Trophy },
+    { id: 'excel', label: 'Dữ liệu Excel', mobileLabel: 'Excel', showInMobileBottom: true, icon: FileSpreadsheet },
   ];
 
   // Active Lesson Full-Focus Mode
@@ -199,7 +203,13 @@ export default function App() {
   }
 
   const dailyPct = Math.min(100, Math.round((profile.todayXp / Math.max(1, profile.dailyGoalXp)) * 100));
-  const completedCount = Object.values(profile.progress).filter((p) => p.stars > 0).length;
+  const completedCount = Object.values(profile.progress).filter(
+    (p) => (p.bestScore ?? 0) > 0 || Boolean(p.completedAt) || (p.stars ?? 0) > 0
+  ).length;
+  const totalNumericScore = Object.values(profile.progress).reduce(
+    (sum, p) => sum + (p.bestScore ?? 0),
+    0
+  );
 
   return (
     <div className="min-h-screen bg-[#FAF9F5] text-stone-900 flex flex-col lg:flex-row">
@@ -302,15 +312,27 @@ export default function App() {
           Học Chữ Cơ Ho
         </span>
 
-        <div className="flex items-center gap-3 text-xs font-bold tabular-nums shrink-0">
+        <div className="flex items-center gap-2 text-xs font-bold tabular-nums shrink-0">
           <div className="flex items-center gap-1 text-amber-600">
             <Flame className="w-4 h-4 fill-amber-500" />
             <span>{profile.streak}</span>
           </div>
-          <div className="flex items-center gap-1 text-emerald-700">
+          <button
+            type="button"
+            onClick={() => {
+              playTapSound();
+              setActiveTab('leaderboard');
+            }}
+            aria-label="Xem bảng xếp hạng"
+            className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
+              activeTab === 'leaderboard'
+                ? 'bg-emerald-100 text-emerald-800'
+                : 'text-emerald-700 hover:bg-stone-100'
+            }`}
+          >
             <Trophy className="w-4 h-4" />
-            <span>{profile.xp} XP</span>
-          </div>
+            <span>Xếp hạng</span>
+          </button>
           <button
             type="button"
             onClick={handleToggleSound}
@@ -344,6 +366,13 @@ export default function App() {
                 <SkillPracticeView
                   lessons={lessons}
                   onStartCustomLesson={(lesson) => setActiveLesson(lesson)}
+                />
+              )}
+              {activeTab === 'leaderboard' && (
+                <LeaderboardView
+                  currentProfile={profile}
+                  totalLessonsCount={lessons.length}
+                  onUpdateDisplayName={saveDisplayName}
                 />
               )}
               {activeTab === 'excel' && (
@@ -398,8 +427,8 @@ export default function App() {
               style={{ width: `${Math.max(4, dailyPct)}%` }}
             />
           </div>
-          <p className="text-xs text-stone-600">
-            Hoàn thành {completedCount}/{lessons.length} bài học trên hành trình.
+          <p className="text-xs text-stone-600 tabular-nums">
+            Hoàn thành {completedCount}/{lessons.length} bài · Tổng điểm bài học: {totalNumericScore}/{lessons.length * 100}
           </p>
         </div>
 
@@ -409,7 +438,10 @@ export default function App() {
           <div className="space-y-2.5">
             {LEVEL_METADATA.map((meta) => {
               const lvlLessons = lessons.filter((l) => l.level === meta.level);
-              const done = lvlLessons.filter((l) => (profile.progress[l.id]?.stars ?? 0) > 0).length;
+              const done = lvlLessons.filter((l) => {
+                const p = profile.progress[l.id];
+                return Boolean(p && ((p.bestScore ?? 0) > 0 || p.completedAt || (p.stars ?? 0) > 0));
+              }).length;
               const pct = lvlLessons.length > 0 ? Math.round((done / lvlLessons.length) * 100) : 0;
 
               return (
@@ -440,28 +472,30 @@ export default function App() {
         aria-label="Điều hướng di động"
         className="lg:hidden fixed bottom-0 left-0 right-0 z-30 h-16 bg-white/95 backdrop-blur-md border-t border-stone-200 grid grid-cols-5 items-center px-1"
       >
-        {navItems.map((item) => {
-          const Icon = item.icon;
-          const isActive = activeTab === item.id;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => {
-                playTapSound();
-                setActiveTab(item.id);
-              }}
-              className={`flex flex-col items-center justify-center gap-1 min-h-[48px] rounded-xl transition-colors ${
-                isActive ? 'text-emerald-700 font-bold' : 'text-stone-500 font-medium'
-              }`}
-            >
-              <Icon className="w-5 h-5" />
-              <span className="text-[11px] leading-none whitespace-nowrap">
-                {item.mobileLabel || item.label}
-              </span>
-            </button>
-          );
-        })}
+        {navItems
+          .filter((item) => item.showInMobileBottom)
+          .map((item) => {
+            const Icon = item.icon;
+            const isActive = activeTab === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => {
+                  playTapSound();
+                  setActiveTab(item.id);
+                }}
+                className={`flex flex-col items-center justify-center gap-1 min-h-[48px] rounded-xl transition-colors ${
+                  isActive ? 'text-emerald-700 font-bold' : 'text-stone-500 font-medium'
+                }`}
+              >
+                <Icon className="w-5 h-5" />
+                <span className="text-[11px] leading-none whitespace-nowrap">
+                  {item.mobileLabel || item.label}
+                </span>
+              </button>
+            );
+          })}
       </nav>
     </div>
   );
