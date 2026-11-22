@@ -99,3 +99,17 @@ export interface LeaderboardEntry {
   averageScore: number;
   lastActiveDate: string;
 }
+
+export interface AuthUser {
+  id: string;
+  username: string;
+  email: string;
+  studentId: string;
+  createdAt: string;
+}
+
+export interface AuthSessionResponse {
+  authenticated: boolean;
+  user: AuthUser | null;
+  profile: StudentProfile | null;
+}

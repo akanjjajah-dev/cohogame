@@ -49,5 +49,25 @@ CREATE TABLE IF NOT EXISTS lesson_progress (
   PRIMARY KEY (student_id, lesson_id)
 );
 
+CREATE TABLE IF NOT EXISTS user_accounts (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL,
+  username_lower TEXT NOT NULL UNIQUE,
+  email TEXT NOT NULL,
+  email_lower TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  student_id TEXT NOT NULL UNIQUE REFERENCES student_profiles(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+  token_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES user_accounts(id) ON DELETE CASCADE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_lessons_level ON lessons(level, order_index);
 CREATE INDEX IF NOT EXISTS idx_exercises_lesson ON exercises(lesson_id, order_index);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id, expires_at);

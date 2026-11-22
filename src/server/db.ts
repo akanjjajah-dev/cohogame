@@ -1,8 +1,10 @@
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { Pool } from 'pg';
 import { SEED_LESSONS } from '../data/seedData.ts';
 import {
+  AuthUser,
   DifficultyLevel,
   ExcelImportRow,
   ExerciseItem,
@@ -10,10 +12,31 @@ import {
   LessonItem,
   StudentProfile,
 } from '../shared/types.ts';
+import { verifyPassword } from './auth.ts';
+
+interface StoredUserAccount {
+  id: string;
+  username: string;
+  usernameLower: string;
+  email: string;
+  emailLower: string;
+  passwordHash: string;
+  studentId: string;
+  createdAt: string;
+}
+
+interface StoredUserSession {
+  tokenHash: string;
+  userId: string;
+  expiresAt: string;
+  createdAt: string;
+}
 
 interface LocalDatabase {
   lessons: LessonItem[];
   students: Record<string, StudentProfile>;
+  accounts?: Record<string, StoredUserAccount>;
+  sessions?: Record<string, StoredUserSession>;
 }
 
 const LOCAL_STORE_PATH = path.resolve(process.cwd(), 'data', 'local_store.json');
@@ -71,6 +94,8 @@ function getPgPool(): Pool | null {
 
 function readLocalStore(): LocalDatabase {
   if (memoryStore) {
+    memoryStore.accounts = memoryStore.accounts || {};
+    memoryStore.sessions = memoryStore.sessions || {};
     return memoryStore;
   }
   try {
@@ -78,6 +103,9 @@ function readLocalStore(): LocalDatabase {
       const raw = fs.readFileSync(LOCAL_STORE_PATH, 'utf-8');
       const parsed = JSON.parse(raw) as LocalDatabase;
       if (Array.isArray(parsed.lessons) && parsed.lessons.length > 0) {
+        parsed.students = parsed.students || {};
+        parsed.accounts = parsed.accounts || {};
+        parsed.sessions = parsed.sessions || {};
         memoryStore = parsed;
         return memoryStore;
       }
@@ -90,6 +118,8 @@ function readLocalStore(): LocalDatabase {
     students: {
       default: getDefaultStudent('default'),
     },
+    accounts: {},
+    sessions: {},
   };
   writeLocalStore(memoryStore);
   return memoryStore;
@@ -166,6 +196,33 @@ async function ensurePgSchemaAndSeed(pool: Pool): Promise<void> {
       completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (student_id, lesson_id)
     );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_accounts (
+      id TEXT PRIMARY KEY,
+      username TEXT NOT NULL,
+      username_lower TEXT NOT NULL UNIQUE,
+      email TEXT NOT NULL,
+      email_lower TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      student_id TEXT NOT NULL UNIQUE REFERENCES student_profiles(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_sessions (
+      token_hash TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES user_accounts(id) ON DELETE CASCADE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id, expires_at);
   `);
 
   const countRes = await pool.query('SELECT COUNT(*)::int AS cnt FROM lessons');
@@ -627,4 +684,371 @@ export async function getLeaderboard(
   }));
 
   return { entries, storage: 'local' };
+}
+
+export class AuthConflictError extends Error {
+  code: 'USERNAME_TAKEN' | 'EMAIL_TAKEN';
+
+  constructor(code: 'USERNAME_TAKEN' | 'EMAIL_TAKEN', message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+export interface TrialProgressInput {
+  lessonId: string;
+  score: number;
+  earnedXp: number;
+}
+
+async function applyTrialProgressToStudent(
+  studentId: string,
+  trialProgress?: TrialProgressInput[]
+): Promise<void> {
+  if (!Array.isArray(trialProgress) || trialProgress.length === 0) return;
+  const { lessons } = await getAllLessons();
+  const allowedTrialIds = new Set(lessons.slice(0, 5).map((l) => l.id));
+  const validItems = trialProgress
+    .filter((item) => item && typeof item.lessonId === 'string' && allowedTrialIds.has(item.lessonId))
+    .slice(0, 5);
+
+  if (validItems.length === 0) return;
+
+  const existingProfile = await getStudentProfile(studentId);
+  for (const item of validItems) {
+    const alreadyDone = existingProfile.progress[item.lessonId];
+    const safeScore = Math.max(0, Math.min(100, Math.round(Number(item.score) || 0)));
+    const safeXp = Math.max(0, Math.min(80, Math.round(Number(item.earnedXp) || 0)));
+    if (safeScore <= 0 && safeXp <= 0) continue;
+    // On login, only award XP if this trial lesson wasn't already recorded for this account
+    const xpToAdd = alreadyDone ? 0 : safeXp;
+    await recordLessonCompletion({
+      studentId,
+      lessonId: item.lessonId,
+      score: safeScore,
+      earnedXp: xpToAdd,
+      heartsRemaining: existingProfile.hearts || 5,
+    });
+  }
+}
+
+export async function registerUserAccount(params: {
+  username: string;
+  email: string;
+  passwordHash: string;
+  trialProgress?: TrialProgressInput[];
+}): Promise<{ user: AuthUser; profile: StudentProfile }> {
+  const cleanUsername = params.username.trim();
+  const usernameLower = cleanUsername.toLowerCase();
+  const cleanEmail = params.email.trim();
+  const emailLower = cleanEmail.toLowerCase();
+  const userId = `acc-${crypto.randomUUID()}`;
+  const studentId = `usr-${crypto.randomUUID()}`;
+  const today = getTodayIso();
+  const nowIso = new Date().toISOString();
+
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      await ensurePgSchemaAndSeed(pool);
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        const existingUsername = await client.query(
+          'SELECT id FROM user_accounts WHERE username_lower = $1 LIMIT 1',
+          [usernameLower]
+        );
+        if (existingUsername.rows.length > 0) {
+          await client.query('ROLLBACK');
+          throw new AuthConflictError('USERNAME_TAKEN', 'Tên đăng nhập này đã có người sử dụng.');
+        }
+
+        const existingEmail = await client.query(
+          'SELECT id FROM user_accounts WHERE email_lower = $1 LIMIT 1',
+          [emailLower]
+        );
+        if (existingEmail.rows.length > 0) {
+          await client.query('ROLLBACK');
+          throw new AuthConflictError('EMAIL_TAKEN', 'Email này đã được đăng ký tài khoản.');
+        }
+
+        await client.query(
+          `INSERT INTO student_profiles (id, display_name, xp, streak, hearts, daily_goal_xp, today_xp, last_active_date)
+           VALUES ($1, $2, 0, 1, 5, 50, 0, $3)`,
+          [studentId, cleanUsername, today]
+        );
+
+        await client.query(
+          `INSERT INTO user_accounts (id, username, username_lower, email, email_lower, password_hash, student_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [userId, cleanUsername, usernameLower, cleanEmail, emailLower, params.passwordHash, studentId]
+        );
+
+        await client.query('COMMIT');
+      } catch (err) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Ignore rollback error
+        }
+        if (err instanceof AuthConflictError) {
+          throw err;
+        }
+        const pgErr = err as { code?: string; constraint?: string };
+        if (pgErr?.code === '23505') {
+          if (pgErr.constraint?.includes('email')) {
+            throw new AuthConflictError('EMAIL_TAKEN', 'Email này đã được đăng ký tài khoản.');
+          }
+          throw new AuthConflictError('USERNAME_TAKEN', 'Tên đăng nhập này đã có người sử dụng.');
+        }
+        throw err;
+      } finally {
+        client.release();
+      }
+
+      await applyTrialProgressToStudent(studentId, params.trialProgress);
+      const profile = await getStudentProfile(studentId);
+      return {
+        user: {
+          id: userId,
+          username: cleanUsername,
+          email: cleanEmail,
+          studentId,
+          createdAt: nowIso,
+        },
+        profile,
+      };
+    } catch (err) {
+      if (err instanceof AuthConflictError) {
+        throw err;
+      }
+      console.error('Supabase user registration failed, falling back to local:', err);
+    }
+  }
+
+  const local = readLocalStore();
+  const accountsList = Object.values(local.accounts || {});
+  if (accountsList.some((acc) => acc.usernameLower === usernameLower)) {
+    throw new AuthConflictError('USERNAME_TAKEN', 'Tên đăng nhập này đã có người sử dụng.');
+  }
+  if (accountsList.some((acc) => acc.emailLower === emailLower)) {
+    throw new AuthConflictError('EMAIL_TAKEN', 'Email này đã được đăng ký tài khoản.');
+  }
+
+  const profile = getDefaultStudent(studentId, cleanUsername);
+  local.students[studentId] = profile;
+  local.accounts = local.accounts || {};
+  local.accounts[userId] = {
+    id: userId,
+    username: cleanUsername,
+    usernameLower,
+    email: cleanEmail,
+    emailLower,
+    passwordHash: params.passwordHash,
+    studentId,
+    createdAt: nowIso,
+  };
+  writeLocalStore(local);
+
+  await applyTrialProgressToStudent(studentId, params.trialProgress);
+  const syncedProfile = await getStudentProfile(studentId);
+
+  return {
+    user: {
+      id: userId,
+      username: cleanUsername,
+      email: cleanEmail,
+      studentId,
+      createdAt: nowIso,
+    },
+    profile: syncedProfile,
+  };
+}
+
+export async function authenticateUserAccount(
+  identifier: string,
+  password: string,
+  trialProgress?: TrialProgressInput[]
+): Promise<{ user: AuthUser; profile: StudentProfile } | null> {
+  const cleanLower = identifier.trim().toLowerCase();
+  if (!cleanLower) return null;
+
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      await ensurePgSchemaAndSeed(pool);
+      const res = await pool.query(
+        `SELECT id, username, email, password_hash, student_id, created_at
+         FROM user_accounts
+         WHERE email_lower = $1 OR username_lower = $1
+         LIMIT 1`,
+        [cleanLower]
+      );
+      if (res.rows.length > 0) {
+        const row = res.rows[0];
+        if (!verifyPassword(password, String(row.password_hash))) {
+          return null;
+        }
+        const stId = String(row.student_id);
+        await applyTrialProgressToStudent(stId, trialProgress);
+        const profile = await getStudentProfile(stId);
+        return {
+          user: {
+            id: String(row.id),
+            username: String(row.username),
+            email: String(row.email),
+            studentId: stId,
+            createdAt: new Date(row.created_at).toISOString(),
+          },
+          profile,
+        };
+      }
+      return null;
+    } catch (err) {
+      console.error('Supabase login failed, falling back to local:', err);
+    }
+  }
+
+  const local = readLocalStore();
+  const matched = Object.values(local.accounts || {}).find(
+    (acc) => acc.emailLower === cleanLower || acc.usernameLower === cleanLower
+  );
+  if (!matched || !verifyPassword(password, matched.passwordHash)) {
+    return null;
+  }
+  await applyTrialProgressToStudent(matched.studentId, trialProgress);
+  const profile = await getStudentProfile(matched.studentId);
+  return {
+    user: {
+      id: matched.id,
+      username: matched.username,
+      email: matched.email,
+      studentId: matched.studentId,
+      createdAt: matched.createdAt,
+    },
+    profile,
+  };
+}
+
+export async function createUserSession(
+  userId: string,
+  tokenHash: string,
+  expiresAtIso: string
+): Promise<void> {
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      await ensurePgSchemaAndSeed(pool);
+      await pool.query(
+        `INSERT INTO user_sessions (token_hash, user_id, expires_at)
+         VALUES ($1, $2, $3::timestamptz)
+         ON CONFLICT (token_hash) DO UPDATE SET
+           user_id = EXCLUDED.user_id,
+           expires_at = EXCLUDED.expires_at`,
+        [tokenHash, userId, expiresAtIso]
+      );
+      await pool.query('DELETE FROM user_sessions WHERE expires_at <= NOW()');
+      return;
+    } catch (err) {
+      console.error('Supabase create session failed, saving locally:', err);
+    }
+  }
+
+  const local = readLocalStore();
+  local.sessions = local.sessions || {};
+  const nowMs = Date.now();
+  for (const [k, s] of Object.entries(local.sessions)) {
+    if (Date.parse(s.expiresAt) <= nowMs) {
+      delete local.sessions[k];
+    }
+  }
+  local.sessions[tokenHash] = {
+    tokenHash,
+    userId,
+    expiresAt: expiresAtIso,
+    createdAt: new Date().toISOString(),
+  };
+  writeLocalStore(local);
+}
+
+export async function getSessionAccount(
+  tokenHash: string
+): Promise<{ user: AuthUser; profile: StudentProfile } | null> {
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      await ensurePgSchemaAndSeed(pool);
+      const res = await pool.query(
+        `SELECT ua.id, ua.username, ua.email, ua.student_id, ua.created_at, us.expires_at
+         FROM user_sessions us
+         JOIN user_accounts ua ON ua.id = us.user_id
+         WHERE us.token_hash = $1
+         LIMIT 1`,
+        [tokenHash]
+      );
+      if (res.rows.length === 0) {
+        return null;
+      }
+      const row = res.rows[0];
+      if (new Date(row.expires_at).getTime() <= Date.now()) {
+        await pool.query('DELETE FROM user_sessions WHERE token_hash = $1', [tokenHash]);
+        return null;
+      }
+      const profile = await getStudentProfile(String(row.student_id));
+      return {
+        user: {
+          id: String(row.id),
+          username: String(row.username),
+          email: String(row.email),
+          studentId: String(row.student_id),
+          createdAt: new Date(row.created_at).toISOString(),
+        },
+        profile,
+      };
+    } catch (err) {
+      console.error('Supabase get session failed, falling back to local:', err);
+    }
+  }
+
+  const local = readLocalStore();
+  const session = local.sessions?.[tokenHash];
+  if (!session) return null;
+  if (Date.parse(session.expiresAt) <= Date.now()) {
+    delete local.sessions![tokenHash];
+    writeLocalStore(local);
+    return null;
+  }
+  const account = local.accounts?.[session.userId];
+  if (!account) return null;
+  const profile = await getStudentProfile(account.studentId);
+  return {
+    user: {
+      id: account.id,
+      username: account.username,
+      email: account.email,
+      studentId: account.studentId,
+      createdAt: account.createdAt,
+    },
+    profile,
+  };
+}
+
+export async function deleteUserSession(tokenHash: string): Promise<void> {
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      await ensurePgSchemaAndSeed(pool);
+      await pool.query('DELETE FROM user_sessions WHERE token_hash = $1', [tokenHash]);
+      return;
+    } catch (err) {
+      console.error('Supabase delete session failed:', err);
+    }
+  }
+
+  const local = readLocalStore();
+  if (local.sessions && local.sessions[tokenHash]) {
+    delete local.sessions[tokenHash];
+    writeLocalStore(local);
+  }
 }

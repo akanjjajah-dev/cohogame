@@ -9,6 +9,7 @@ import {
   User,
 } from 'lucide-react';
 import { LeaderboardEntry, StudentProfile } from '../shared/types';
+import { apiFetch } from '../lib/api';
 import { playTapSound } from '../lib/audio';
 
 interface LeaderboardViewProps {
@@ -33,7 +34,7 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
     setIsLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/leaderboard?sort=${sort}&limit=50`);
+      const res = await apiFetch(`/api/leaderboard?sort=${sort}&limit=50`);
       if (!res.ok) {
         throw new Error('Không thể tải bảng xếp hạng.');
       }

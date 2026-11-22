@@ -1,10 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   BookA,
   Compass,
   FileSpreadsheet,
   Flame,
   Heart,
+  LogIn,
+  LogOut,
   Sparkles,
   Trophy,
   User,
@@ -15,8 +17,10 @@ import {
   Search,
 } from 'lucide-react';
 import { LEVEL_METADATA, SEED_LESSONS } from './data/seedData';
-import { LessonItem, StudentProfile } from './shared/types';
+import { AuthUser, LessonItem, StudentProfile } from './shared/types';
+import { apiFetch } from './lib/api';
 import { getSoundMuted, setSoundMuted, playTapSound } from './lib/audio';
+import { AuthGateView, TrialProgressSyncItem } from './components/AuthGateView';
 import { LearningPathView } from './components/LearningPathView';
 import { LookupView } from './components/LookupView';
 import { AlphabetView } from './components/AlphabetView';
@@ -27,48 +31,109 @@ import { LessonPlayer } from './components/LessonPlayer';
 
 type NavTab = 'learn' | 'lookup' | 'alphabet' | 'skills' | 'leaderboard' | 'excel';
 
-const STUDENT_ID_KEY = 'coho_student_id';
+const FREE_TRIAL_LESSON_LIMIT = 5;
+const GUEST_TRIAL_STORAGE_KEY = 'coho_guest_trial_profile_v1';
 
-function getOrCreateStudentId(): string {
-  if (typeof window === 'undefined') return 'default';
-  let existing = window.localStorage.getItem(STUDENT_ID_KEY);
-  if (!existing) {
-    existing = 'hs-' + Math.random().toString(36).slice(2, 10);
-    window.localStorage.setItem(STUDENT_ID_KEY, existing);
-  }
-  return existing;
+interface StoredGuestTrial {
+  profile: StudentProfile;
+  xpByLesson: Record<string, number>;
 }
 
-const DEFAULT_PROFILE: StudentProfile = {
-  id: 'default',
-  displayName: 'Học sinh Cơ Ho',
-  xp: 0,
-  streak: 1,
-  hearts: 5,
-  dailyGoalXp: 50,
-  todayXp: 0,
-  lastActiveDate: new Date().toISOString().slice(0, 10),
-  progress: {},
-};
+function getDefaultGuestProfile(): StudentProfile {
+  return {
+    id: 'guest-trial',
+    displayName: 'Khách chơi thử',
+    xp: 0,
+    streak: 1,
+    hearts: 5,
+    dailyGoalXp: 50,
+    todayXp: 0,
+    lastActiveDate: new Date().toISOString().slice(0, 10),
+    progress: {},
+  };
+}
+
+function loadGuestTrial(): StoredGuestTrial {
+  const fallback: StoredGuestTrial = { profile: getDefaultGuestProfile(), xpByLesson: {} };
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const raw = window.localStorage.getItem(GUEST_TRIAL_STORAGE_KEY);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Partial<StoredGuestTrial>;
+    if (!parsed.profile) return fallback;
+    return {
+      profile: {
+        ...getDefaultGuestProfile(),
+        ...parsed.profile,
+        progress: parsed.profile.progress || {},
+      },
+      xpByLesson: parsed.xpByLesson || {},
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function saveGuestTrial(trial: StoredGuestTrial): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(GUEST_TRIAL_STORAGE_KEY, JSON.stringify(trial));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+function clearGuestTrial(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(GUEST_TRIAL_STORAGE_KEY);
+  } catch {
+    // Ignore
+  }
+}
 
 export default function App() {
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [activeTab, setActiveTab] = useState<NavTab>('learn');
   const [lessons, setLessons] = useState<LessonItem[]>(SEED_LESSONS);
-  const [profile, setProfile] = useState<StudentProfile>(DEFAULT_PROFILE);
+  const [profile, setProfile] = useState<StudentProfile>(() => loadGuestTrial().profile);
+  const [guestXpByLesson, setGuestXpByLesson] = useState<Record<string, number>>(
+    () => loadGuestTrial().xpByLesson
+  );
   const [activeLesson, setActiveLesson] = useState<LessonItem | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [muted, setMuted] = useState(getSoundMuted());
   const [isEditingName, setIsEditingName] = useState(false);
   const [nameInput, setNameInput] = useState('');
-  const [studentId] = useState<string>(getOrCreateStudentId);
+
+  // Auth modal state (triggered after completing lesson 5 or clicking lesson 6+ / login button)
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authModalReason, setAuthModalReason] = useState<'after_trial' | 'locked_lesson' | 'manual'>('manual');
+  const [authModalMode, setAuthModalMode] = useState<'login' | 'register'>('register');
+  const [pendingLessonAfterAuth, setPendingLessonAfterAuth] = useState<LessonItem | null>(null);
+  const [justFinishedFifthTrial, setJustFinishedFifthTrial] = useState(false);
+
+  const openAuthModal = useCallback(
+    (
+      reason: 'after_trial' | 'locked_lesson' | 'manual',
+      mode: 'login' | 'register' = 'register',
+      pendingLesson: LessonItem | null = null
+    ) => {
+      setAuthModalReason(reason);
+      setAuthModalMode(mode);
+      setPendingLessonAfterAuth(pendingLesson);
+      setShowAuthModal(true);
+    },
+    []
+  );
 
   useEffect(() => {
     let cancelled = false;
     async function bootstrap() {
       try {
-        const [curRes, profRes] = await Promise.all([
-          fetch('/api/curriculum'),
-          fetch(`/api/student/${encodeURIComponent(studentId)}`),
+        const [curRes, sessionRes] = await Promise.all([
+          apiFetch('/api/curriculum'),
+          apiFetch('/api/auth/session'),
         ]);
         if (!cancelled && curRes.ok) {
           const curData = await curRes.json();
@@ -76,15 +141,24 @@ export default function App() {
             setLessons(curData.lessons);
           }
         }
-        if (!cancelled && profRes.ok) {
-          const profData = await profRes.json();
-          if (profData && profData.id) {
-            setProfile(profData);
-            setNameInput(profData.displayName || 'Học sinh Cơ Ho');
+        if (!cancelled && sessionRes.ok) {
+          const sessionData = await sessionRes.json();
+          if (sessionData.authenticated && sessionData.user && sessionData.profile) {
+            setAuthUser(sessionData.user);
+            setProfile(sessionData.profile);
+            setNameInput(sessionData.profile.displayName || sessionData.user.username);
+            return;
           }
         }
+        if (!cancelled) {
+          const trial = loadGuestTrial();
+          setAuthUser(null);
+          setProfile(trial.profile);
+          setGuestXpByLesson(trial.xpByLesson);
+          setNameInput(trial.profile.displayName);
+        }
       } catch {
-        // Keep seeded defaults if offline
+        // Keep seeded defaults & guest trial progress if offline
       } finally {
         if (!cancelled) setIsLoading(false);
       }
@@ -93,7 +167,57 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [studentId]);
+  }, []);
+
+  const buildTrialProgressPayload = (): TrialProgressSyncItem[] => {
+    if (authUser) return [];
+    const firstFiveIds = lessons.slice(0, FREE_TRIAL_LESSON_LIMIT).map((l) => l.id);
+    const items: TrialProgressSyncItem[] = [];
+    for (const lessonId of firstFiveIds) {
+      const prog = profile.progress[lessonId];
+      if (prog) {
+        items.push({
+          lessonId,
+          score: prog.bestScore ?? 0,
+          earnedXp: guestXpByLesson[lessonId] ?? 15,
+        });
+      }
+    }
+    return items;
+  };
+
+  const handleAuthSuccess = async (user: AuthUser, nextProfile: StudentProfile) => {
+    clearGuestTrial();
+    setGuestXpByLesson({});
+    setAuthUser(user);
+    setProfile(nextProfile);
+    setNameInput(nextProfile.displayName || user.username);
+    setShowAuthModal(false);
+    setJustFinishedFifthTrial(false);
+
+    if (pendingLessonAfterAuth) {
+      const target = pendingLessonAfterAuth;
+      setPendingLessonAfterAuth(null);
+      setActiveLesson(target);
+    }
+  };
+
+  const handleLogout = async () => {
+    playTapSound();
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // Ignore network error on logout
+    }
+    const trial = loadGuestTrial();
+    setActiveLesson(null);
+    setAuthUser(null);
+    setProfile(trial.profile);
+    setGuestXpByLesson(trial.xpByLesson);
+    setIsEditingName(false);
+    setPendingLessonAfterAuth(null);
+    setJustFinishedFifthTrial(false);
+  };
 
   const handleToggleSound = () => {
     const next = !muted;
@@ -104,13 +228,26 @@ export default function App() {
   const saveDisplayName = async (rawName: string) => {
     const clean = rawName.trim();
     if (!clean) return;
+
+    if (!authUser) {
+      const nextProfile = { ...profile, displayName: clean };
+      setProfile(nextProfile);
+      saveGuestTrial({ profile: nextProfile, xpByLesson: guestXpByLesson });
+      return;
+    }
+
     setProfile((prev) => ({ ...prev, displayName: clean }));
     try {
-      const res = await fetch(`/api/student/${encodeURIComponent(studentId)}`, {
+      const res = await apiFetch(`/api/student/${encodeURIComponent(authUser.studentId)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ displayName: clean }),
       });
+      if (res.status === 401) {
+        setAuthUser(null);
+        openAuthModal('manual', 'login');
+        return;
+      }
       if (res.ok) {
         const updated = await res.json();
         setProfile(updated);
@@ -125,6 +262,15 @@ export default function App() {
     await saveDisplayName(nameInput);
   };
 
+  const handleSelectLesson = (lesson: LessonItem) => {
+    const globalIdx = lessons.findIndex((l) => l.id === lesson.id);
+    if (!authUser && globalIdx >= FREE_TRIAL_LESSON_LIMIT) {
+      openAuthModal('locked_lesson', 'register', lesson);
+      return;
+    }
+    setActiveLesson(lesson);
+  };
+
   const handleLessonComplete = async (result: {
     score: number;
     earnedXp: number;
@@ -132,8 +278,41 @@ export default function App() {
   }) => {
     if (!activeLesson) return;
 
-    // Optimistic local update first
     const stars = result.score >= 90 ? 3 : result.score >= 70 ? 2 : result.score >= 40 ? 1 : 0;
+
+    if (!authUser) {
+      const existing = profile.progress[activeLesson.id];
+      const nextProfile: StudentProfile = {
+        ...profile,
+        xp: profile.xp + result.earnedXp,
+        todayXp: profile.todayXp + result.earnedXp,
+        hearts: result.heartsRemaining,
+        progress: {
+          ...profile.progress,
+          [activeLesson.id]: {
+            lessonId: activeLesson.id,
+            stars: Math.max(existing?.stars ?? 0, stars),
+            bestScore: Math.max(existing?.bestScore ?? 0, result.score),
+            completedAt: new Date().toISOString(),
+          },
+        },
+      };
+      const nextXpMap = {
+        ...guestXpByLesson,
+        [activeLesson.id]: Math.max(guestXpByLesson[activeLesson.id] ?? 0, result.earnedXp),
+      };
+      setProfile(nextProfile);
+      setGuestXpByLesson(nextXpMap);
+      saveGuestTrial({ profile: nextProfile, xpByLesson: nextXpMap });
+
+      const fifthLesson = lessons[FREE_TRIAL_LESSON_LIMIT - 1];
+      if (fifthLesson && activeLesson.id === fifthLesson.id) {
+        setJustFinishedFifthTrial(true);
+      }
+      return;
+    }
+
+    // Optimistic local update for authenticated user
     setProfile((prev) => {
       const existing = prev.progress[activeLesson.id];
       return {
@@ -154,7 +333,7 @@ export default function App() {
     });
 
     try {
-      const res = await fetch(`/api/student/${encodeURIComponent(studentId)}/complete`, {
+      const res = await apiFetch(`/api/student/${encodeURIComponent(authUser.studentId)}/complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -164,12 +343,27 @@ export default function App() {
           heartsRemaining: result.heartsRemaining,
         }),
       });
+      if (res.status === 401) {
+        setAuthUser(null);
+        openAuthModal('manual', 'login');
+        return;
+      }
       if (res.ok) {
         const updated = await res.json();
         setProfile(updated);
       }
     } catch {
       // Keep optimistic progress
+    }
+  };
+
+  const handleExitLesson = () => {
+    const finishedFifth = justFinishedFifthTrial;
+    setJustFinishedFifthTrial(false);
+    setActiveLesson(null);
+    if (!authUser && finishedFifth) {
+      const sixthLesson = lessons[FREE_TRIAL_LESSON_LIMIT] || null;
+      openAuthModal('after_trial', 'register', sixthLesson);
     }
   };
 
@@ -195,7 +389,7 @@ export default function App() {
         <LessonPlayer
           lesson={activeLesson}
           initialHearts={profile.hearts}
-          onExit={() => setActiveLesson(null)}
+          onExit={handleExitLesson}
           onComplete={handleLessonComplete}
         />
       </div>
@@ -249,12 +443,12 @@ export default function App() {
         </div>
 
         <div className="space-y-3 pt-4 border-t border-stone-200">
-          {/* Student Name Switcher */}
+          {/* Student Account / Trial Status Card */}
           <div className="bg-stone-50 border border-stone-200 rounded-xl p-3 space-y-2">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-xs font-semibold text-stone-500">
                 <User className="w-4 h-4" />
-                <span>Học sinh</span>
+                <span>{authUser ? 'Tài khoản học tập' : 'Chơi thử (Màn 1–5)'}</span>
               </div>
               {!isEditingName && (
                 <button
@@ -291,7 +485,14 @@ export default function App() {
                 </button>
               </div>
             ) : (
-              <div className="text-sm font-bold text-stone-900 truncate">{profile.displayName}</div>
+              <div>
+                <div className="text-sm font-bold text-stone-900 truncate">{profile.displayName}</div>
+                {authUser ? (
+                  <div className="text-[11px] font-medium text-stone-500 truncate">@{authUser.username}</div>
+                ) : (
+                  <div className="text-[11px] font-medium text-amber-700">Cần đăng nhập từ Màn 6</div>
+                )}
+              </div>
             )}
           </div>
 
@@ -303,16 +504,39 @@ export default function App() {
             <span>Âm thanh hiệu ứng</span>
             {muted ? <VolumeX className="w-4 h-4 text-stone-400" /> : <Volume2 className="w-4 h-4 text-emerald-700" />}
           </button>
+
+          {authUser ? (
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="w-full flex items-center justify-between px-3 py-2.5 text-xs font-bold text-rose-700 hover:bg-rose-50 rounded-xl min-h-[40px] transition-colors"
+            >
+              <span>Đăng xuất</span>
+              <LogOut className="w-4 h-4" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                playTapSound();
+                openAuthModal('manual', 'login');
+              }}
+              className="w-full flex items-center justify-between px-3 py-2.5 text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-xl min-h-[40px] transition-colors"
+            >
+              <span>Đăng nhập / Đăng ký</span>
+              <LogIn className="w-4 h-4" />
+            </button>
+          )}
         </div>
       </aside>
 
       {/* Mobile Compact Sticky Top Bar (<= 8% viewport height) */}
-      <header className="lg:hidden sticky top-0 z-30 h-14 px-4 bg-white/95 backdrop-blur-md border-b border-stone-200 flex items-center justify-between gap-4">
+      <header className="lg:hidden sticky top-0 z-30 h-14 px-4 bg-white/95 backdrop-blur-md border-b border-stone-200 flex items-center justify-between gap-2">
         <span className="text-base font-extrabold tracking-tight text-emerald-800 whitespace-nowrap shrink-0">
           Học Chữ Cơ Ho
         </span>
 
-        <div className="flex items-center gap-2 text-xs font-bold tabular-nums shrink-0">
+        <div className="flex items-center gap-1.5 text-xs font-bold tabular-nums shrink-0">
           <div className="flex items-center gap-1 text-amber-600">
             <Flame className="w-4 h-4 fill-amber-500" />
             <span>{profile.streak}</span>
@@ -324,7 +548,7 @@ export default function App() {
               setActiveTab('leaderboard');
             }}
             aria-label="Xem bảng xếp hạng"
-            className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
+            className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
               activeTab === 'leaderboard'
                 ? 'bg-emerald-100 text-emerald-800'
                 : 'text-emerald-700 hover:bg-stone-100'
@@ -341,6 +565,30 @@ export default function App() {
           >
             {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4 text-emerald-700" />}
           </button>
+          {authUser ? (
+            <button
+              type="button"
+              onClick={handleLogout}
+              aria-label="Đăng xuất tài khoản"
+              title="Đăng xuất"
+              className="w-9 h-9 rounded-lg flex items-center justify-center text-rose-600 hover:bg-rose-50"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                playTapSound();
+                openAuthModal('manual', 'login');
+              }}
+              aria-label="Đăng nhập hoặc đăng ký"
+              title="Đăng nhập"
+              className="w-9 h-9 rounded-lg flex items-center justify-center text-emerald-700 hover:bg-emerald-50"
+            >
+              <LogIn className="w-4 h-4" />
+            </button>
+          )}
         </div>
       </header>
 
@@ -357,7 +605,8 @@ export default function App() {
                 <LearningPathView
                   lessons={lessons}
                   profile={profile}
-                  onSelectLesson={(lesson) => setActiveLesson(lesson)}
+                  isAuthenticated={Boolean(authUser)}
+                  onSelectLesson={handleSelectLesson}
                 />
               )}
               {activeTab === 'lookup' && <LookupView lessons={lessons} />}
@@ -365,6 +614,8 @@ export default function App() {
               {activeTab === 'skills' && (
                 <SkillPracticeView
                   lessons={lessons}
+                  isAuthenticated={Boolean(authUser)}
+                  onRequireAuth={() => openAuthModal('locked_lesson', 'register')}
                   onStartCustomLesson={(lesson) => setActiveLesson(lesson)}
                 />
               )}
@@ -379,12 +630,26 @@ export default function App() {
                 <ExcelManagerView
                   lessons={lessons}
                   onImportSuccess={(nextLessons) => setLessons(nextLessons)}
+                  onRequireAuth={() => openAuthModal('manual', 'login')}
                 />
               )}
             </>
           )}
         </div>
       </main>
+
+      {showAuthModal && (
+        <AuthGateView
+          initialMode={authModalMode}
+          reason={authModalReason}
+          trialProgress={buildTrialProgressPayload()}
+          onClose={() => {
+            setShowAuthModal(false);
+            setPendingLessonAfterAuth(null);
+          }}
+          onAuthSuccess={handleAuthSuccess}
+        />
+      )}
 
       {/* Desktop Right Stats Rail */}
       <aside className="hidden xl:flex xl:flex-col xl:w-80 xl:shrink-0 p-6 pl-0 space-y-5">

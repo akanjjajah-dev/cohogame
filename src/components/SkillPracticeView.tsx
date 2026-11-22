@@ -5,6 +5,8 @@ import { playTapSound } from '../lib/audio';
 
 interface SkillPracticeViewProps {
   lessons: LessonItem[];
+  isAuthenticated: boolean;
+  onRequireAuth: () => void;
   onStartCustomLesson: (lesson: LessonItem) => void;
 }
 
@@ -47,19 +49,33 @@ const SKILLS: {
 
 export const SkillPracticeView: React.FC<SkillPracticeViewProps> = ({
   lessons,
+  isAuthenticated,
+  onRequireAuth,
   onStartCustomLesson,
 }) => {
   const [selectedLevel, setSelectedLevel] = useState<DifficultyLevel | 0>(0);
 
   const handleLaunchSkill = (skill: SkillType) => {
     playTapSound();
-    const pool = lessons
-      .filter((l) => (selectedLevel === 0 ? true : l.level === selectedLevel))
+    const accessibleLessons = isAuthenticated ? lessons : lessons.slice(0, 5);
+    const matchingLessons = accessibleLessons.filter((l) =>
+      selectedLevel === 0 ? true : l.level === selectedLevel
+    );
+
+    if (!isAuthenticated && matchingLessons.length === 0) {
+      onRequireAuth();
+      return;
+    }
+
+    const pool = matchingLessons
       .flatMap((l) => l.exercises)
       .filter((ex) => ex.skill === skill);
 
     const chosen = pool.slice(0, 6);
-    if (chosen.length === 0) return;
+    if (chosen.length === 0) {
+      if (!isAuthenticated) onRequireAuth();
+      return;
+    }
 
     const skillMeta = SKILLS.find((s) => s.id === skill)!;
     onStartCustomLesson({
@@ -69,7 +85,9 @@ export const SkillPracticeView: React.FC<SkillPracticeViewProps> = ({
       title: `Luyện kỹ năng: ${skillMeta.title}`,
       description:
         selectedLevel === 0
-          ? 'Tổng hợp từ tất cả 5 cấp độ'
+          ? isAuthenticated
+            ? 'Tổng hợp từ tất cả 5 cấp độ'
+            : 'Tổng hợp từ 5 màn chơi thử đầu tiên'
           : `Ôn tập chuyên sâu Cấp độ ${selectedLevel}`,
       xpReward: 25,
       exercises: chosen,

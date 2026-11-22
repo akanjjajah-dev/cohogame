@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
   CheckCircle2,
+  Lock,
   Play,
   BookOpen,
   Award,
@@ -9,15 +10,19 @@ import { LEVEL_METADATA } from '../data/seedData';
 import { DifficultyLevel, LessonItem, StudentProfile } from '../shared/types';
 import { playTapSound } from '../lib/audio';
 
+const FREE_TRIAL_LESSON_LIMIT = 5;
+
 interface LearningPathViewProps {
   lessons: LessonItem[];
   profile: StudentProfile;
+  isAuthenticated: boolean;
   onSelectLesson: (lesson: LessonItem) => void;
 }
 
 export const LearningPathView: React.FC<LearningPathViewProps> = ({
   lessons,
   profile,
+  isAuthenticated,
   onSelectLesson,
 }) => {
   const [selectedLevel, setSelectedLevel] = useState<DifficultyLevel | 0>(0);
@@ -37,6 +42,10 @@ export const LearningPathView: React.FC<LearningPathViewProps> = ({
   const nextRecommendedLesson =
     lessons.find((l) => !isLessonDone(l.id)) ||
     lessons[0];
+  const nextRecommendedGlobalIdx = nextRecommendedLesson
+    ? lessons.findIndex((l) => l.id === nextRecommendedLesson.id)
+    : -1;
+  const isNextLockedByAuth = !isAuthenticated && nextRecommendedGlobalIdx >= FREE_TRIAL_LESSON_LIMIT;
 
   return (
     <div className="space-y-6">
@@ -72,8 +81,16 @@ export const LearningPathView: React.FC<LearningPathViewProps> = ({
                 }}
                 className="inline-flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-bold rounded-xl border-b-3 border-emerald-800 active:translate-y-0.5 transition-all min-h-[44px]"
               >
-                <Play className="w-4 h-4 fill-current" />
-                <span>Học tiếp: {nextRecommendedLesson.title}</span>
+                {isNextLockedByAuth ? (
+                  <Lock className="w-4 h-4" />
+                ) : (
+                  <Play className="w-4 h-4 fill-current" />
+                )}
+                <span>
+                  {isNextLockedByAuth
+                    ? `Đăng nhập để mở: ${nextRecommendedLesson.title}`
+                    : `Học tiếp: ${nextRecommendedLesson.title}`}
+                </span>
               </button>
             )}
           </div>
@@ -168,6 +185,8 @@ export const LearningPathView: React.FC<LearningPathViewProps> = ({
                     const bestScore = prog?.bestScore ?? 0;
                     const isCompleted = isLessonDone(lesson.id);
                     const isNext = nextRecommendedLesson?.id === lesson.id;
+                    const globalIdx = lessons.findIndex((l) => l.id === lesson.id);
+                    const isLockedForGuest = !isAuthenticated && globalIdx >= FREE_TRIAL_LESSON_LIMIT;
 
                     // Gentle horizontal winding offset on wider screens
                     const offsets = ['sm:ml-0', 'sm:ml-8', 'sm:ml-14', 'sm:ml-8'];
@@ -177,7 +196,7 @@ export const LearningPathView: React.FC<LearningPathViewProps> = ({
                       <div
                         key={lesson.id}
                         className={`bg-white border rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-colors ${offsetClass} ${
-                          isNext
+                          isNext && !isLockedForGuest
                             ? 'border-emerald-500 ring-2 ring-emerald-500/15'
                             : 'border-stone-200 hover:border-stone-300'
                         }`}
@@ -189,16 +208,20 @@ export const LearningPathView: React.FC<LearningPathViewProps> = ({
                               playTapSound();
                               onSelectLesson(lesson);
                             }}
-                            aria-label={`Mở bài ${lesson.title}`}
+                            aria-label={isLockedForGuest ? `Đăng nhập để mở ${lesson.title}` : `Mở bài ${lesson.title}`}
                             className={`w-14 h-14 rounded-2xl flex items-center justify-center shrink-0 border-b-4 transition-transform active:translate-y-0.5 ${
-                              isCompleted
-                                ? 'bg-amber-400 border-amber-600 text-stone-950'
-                                : isNext
-                                  ? 'bg-emerald-600 border-emerald-800 text-white'
-                                  : 'bg-stone-100 border-stone-300 text-stone-700'
+                              isLockedForGuest
+                                ? 'bg-stone-100 border-stone-300 text-stone-500'
+                                : isCompleted
+                                  ? 'bg-amber-400 border-amber-600 text-stone-950'
+                                  : isNext
+                                    ? 'bg-emerald-600 border-emerald-800 text-white'
+                                    : 'bg-stone-100 border-stone-300 text-stone-700'
                             }`}
                           >
-                            {isCompleted ? (
+                            {isLockedForGuest ? (
+                              <Lock className="w-6 h-6" />
+                            ) : isCompleted ? (
                               <CheckCircle2 className="w-7 h-7" />
                             ) : (
                               <BookOpen className="w-6 h-6" />
@@ -207,7 +230,7 @@ export const LearningPathView: React.FC<LearningPathViewProps> = ({
 
                           <div className="space-y-1">
                             <div className="text-xs font-semibold text-stone-500 tabular-nums">
-                              Bài {lesson.orderIndex} · {lesson.exercises.length} câu hỏi · +{lesson.xpReward} XP
+                              Màn {globalIdx + 1} · {lesson.exercises.length} câu hỏi · +{lesson.xpReward} XP
                             </div>
                             <h3 className="text-base sm:text-lg font-extrabold text-stone-900">
                               {lesson.title}
@@ -216,27 +239,37 @@ export const LearningPathView: React.FC<LearningPathViewProps> = ({
 
                             {/* Numeric score & status text */}
                             <div className="flex items-center gap-2 pt-1 text-xs">
-                              {isCompleted ? (
-                                <span className="font-mono font-bold tabular-nums text-amber-700">
-                                  Điểm: {bestScore}/100
+                              {isLockedForGuest ? (
+                                <span className="font-semibold text-amber-700">
+                                  Cần đăng nhập để mở khóa từ màn 6
                                 </span>
                               ) : (
-                                <span className="font-mono font-semibold tabular-nums text-stone-400">
-                                  0/100 điểm
-                                </span>
+                                <>
+                                  {isCompleted ? (
+                                    <span className="font-mono font-bold tabular-nums text-amber-700">
+                                      Điểm: {bestScore}/100
+                                    </span>
+                                  ) : (
+                                    <span className="font-mono font-semibold tabular-nums text-stone-400">
+                                      0/100 điểm
+                                    </span>
+                                  )}
+                                  <span className="text-stone-300">·</span>
+                                  <span className="font-semibold text-stone-500">
+                                    {isCompleted
+                                      ? bestScore >= 90
+                                        ? 'Xuất sắc'
+                                        : bestScore >= 70
+                                          ? 'Khá tốt'
+                                          : 'Hoàn thành'
+                                      : isNext
+                                        ? 'Bài tiếp theo'
+                                        : globalIdx < FREE_TRIAL_LESSON_LIMIT && !isAuthenticated
+                                          ? 'Chơi thử miễn phí'
+                                          : 'Sẵn sàng học'}
+                                  </span>
+                                </>
                               )}
-                              <span className="text-stone-300">·</span>
-                              <span className="font-semibold text-stone-500">
-                                {isCompleted
-                                  ? bestScore >= 90
-                                    ? 'Xuất sắc'
-                                    : bestScore >= 70
-                                      ? 'Khá tốt'
-                                      : 'Hoàn thành'
-                                  : isNext
-                                    ? 'Bài tiếp theo'
-                                    : 'Sẵn sàng học'}
-                              </span>
                             </div>
                           </div>
                         </div>
@@ -247,15 +280,26 @@ export const LearningPathView: React.FC<LearningPathViewProps> = ({
                             playTapSound();
                             onSelectLesson(lesson);
                           }}
-                          className={`w-full sm:w-auto px-5 py-2.5 rounded-xl font-bold text-sm min-h-[44px] whitespace-nowrap shrink-0 transition-all ${
-                            isNext
-                              ? 'bg-emerald-700 hover:bg-emerald-800 text-white border-b-4 border-emerald-900 active:translate-y-0.5'
-                              : isCompleted
-                                ? 'bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300'
-                                : 'bg-stone-100 hover:bg-stone-200 text-stone-900'
+                          className={`w-full sm:w-auto px-5 py-2.5 rounded-xl font-bold text-sm min-h-[44px] whitespace-nowrap shrink-0 transition-all inline-flex items-center justify-center gap-1.5 ${
+                            isLockedForGuest
+                              ? 'bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-300'
+                              : isNext
+                                ? 'bg-emerald-700 hover:bg-emerald-800 text-white border-b-4 border-emerald-900 active:translate-y-0.5'
+                                : isCompleted
+                                  ? 'bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300'
+                                  : 'bg-stone-100 hover:bg-stone-200 text-stone-900'
                           }`}
                         >
-                          {isCompleted ? 'Ôn lại' : 'Bắt đầu'}
+                          {isLockedForGuest ? (
+                            <>
+                              <Lock className="w-3.5 h-3.5" />
+                              <span>Đăng nhập để mở</span>
+                            </>
+                          ) : isCompleted ? (
+                            'Ôn lại'
+                          ) : (
+                            'Bắt đầu'
+                          )}
                         </button>
                       </div>
                     );

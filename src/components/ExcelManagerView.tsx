@@ -8,6 +8,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { ExcelImportRow, LessonItem } from '../shared/types';
+import { apiFetch } from '../lib/api';
 import {
   downloadSampleExcelTemplate,
   exportCurriculumToExcel,
@@ -17,11 +18,13 @@ import {
 interface ExcelManagerViewProps {
   lessons: LessonItem[];
   onImportSuccess: (lessons: LessonItem[]) => void;
+  onRequireAuth?: () => void;
 }
 
 export const ExcelManagerView: React.FC<ExcelManagerViewProps> = ({
   lessons,
   onImportSuccess,
+  onRequireAuth,
 }) => {
   const [parsedRows, setParsedRows] = useState<ExcelImportRow[] | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -62,12 +65,16 @@ export const ExcelManagerView: React.FC<ExcelManagerViewProps> = ({
     setIsSaving(true);
     setStatusMessage(null);
     try {
-      const res = await fetch('/api/curriculum/import', {
+      const res = await apiFetch('/api/curriculum/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rows: parsedRows, mode: importMode }),
       });
       const data = await res.json();
+      if (res.status === 401) {
+        onRequireAuth?.();
+        throw new Error(data.error || 'Vui lòng đăng nhập để lưu dữ liệu Excel.');
+      }
       if (!res.ok) {
         throw new Error(data.error || 'Lỗi lưu dữ liệu');
       }
@@ -92,8 +99,12 @@ export const ExcelManagerView: React.FC<ExcelManagerViewProps> = ({
     setIsSaving(true);
     setStatusMessage(null);
     try {
-      const res = await fetch('/api/curriculum/reset', { method: 'POST' });
+      const res = await apiFetch('/api/curriculum/reset', { method: 'POST' });
       const data = await res.json();
+      if (res.status === 401) {
+        onRequireAuth?.();
+        throw new Error(data.error || 'Vui lòng đăng nhập để khôi phục dữ liệu.');
+      }
       if (!res.ok) throw new Error(data.error || 'Lỗi khôi phục');
       onImportSuccess(data.lessons);
       setConfirmReset(false);
