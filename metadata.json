@@ -2,5 +2,5 @@
   "name": "Học Chữ Cơ Ho",
   "description": "Ứng dụng trò chơi hóa hỗ trợ học sinh nhận biết, nghe, đọc và viết chữ Cơ Ho theo 5 cấp độ khó, hỗ trợ nhập dữ liệu từ Excel.",
   "requestFramePermissions": ["microphone"],
-  "majorCapabilities": []
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

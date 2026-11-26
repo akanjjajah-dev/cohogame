@@ -68,6 +68,20 @@ CREATE TABLE IF NOT EXISTS user_sessions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS ai_chat_conversations (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES user_accounts(id) ON DELETE CASCADE,
+  topic_id TEXT NOT NULL,
+  language_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  messages JSONB NOT NULL DEFAULT '[]'::jsonb,
+  suggestions JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_lessons_level ON lessons(level, order_index);
 CREATE INDEX IF NOT EXISTS idx_exercises_lesson ON exercises(lesson_id, order_index);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_ai_chat_user ON ai_chat_conversations(user_id, updated_at DESC);
+

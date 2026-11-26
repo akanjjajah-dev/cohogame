@@ -113,3 +113,78 @@ export interface AuthSessionResponse {
   user: AuthUser | null;
   profile: StudentProfile | null;
 }
+
+export type ChatTopicId =
+  | 'daily_life'
+  | 'travel'
+  | 'food_restaurant'
+  | 'school'
+  | 'shopping'
+  | 'work'
+  | 'friendship'
+  | 'entertainment';
+
+export type ChatLanguageId = 'en' | 'kho' | 'ja' | 'ko' | 'fr';
+
+export interface ChatTopicMeta {
+  id: ChatTopicId;
+  title: string;
+  titleVi: string;
+  descriptionVi: string;
+}
+
+export interface ChatLanguageMeta {
+  id: ChatLanguageId;
+  label: string;
+  nativeName: string;
+  teacherName: string;
+  speechLang: string;
+}
+
+export interface ChatCorrectionIssue {
+  type: 'grammar' | 'spelling' | 'word_choice';
+  explanationVi: string;
+}
+
+export interface ChatCorrection {
+  hasErrors: boolean;
+  correctedText: string;
+  issues: ChatCorrectionIssue[];
+  naturalSuggestion: string;
+  naturalSuggestionVi: string;
+  encouragementVi: string;
+}
+
+export interface ChatPronunciationFeedback {
+  accuracyNoteVi: string;
+  mispronouncedWords: string[];
+  tipsVi: string;
+}
+
+export interface ChatReplySuggestion {
+  text: string;
+  vietnameseMeaning: string;
+}
+
+export interface AiChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  createdAt: string;
+  vietnameseTranslation?: string;
+  correction?: ChatCorrection;
+  pronunciationFeedback?: ChatPronunciationFeedback;
+  spokenViaMic?: boolean;
+}
+
+export interface AiChatConversation {
+  id: string;
+  topicId: ChatTopicId;
+  languageId: ChatLanguageId;
+  title: string;
+  messages: AiChatMessage[];
+  suggestions: ChatReplySuggestion[];
+  createdAt: string;
+  updatedAt: string;
+}
+

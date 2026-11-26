@@ -4,6 +4,7 @@ import path from 'path';
 import { Pool } from 'pg';
 import { SEED_LESSONS } from '../data/seedData.ts';
 import {
+  AiChatConversation,
   AuthUser,
   DifficultyLevel,
   ExcelImportRow,
@@ -37,13 +38,29 @@ interface LocalDatabase {
   students: Record<string, StudentProfile>;
   accounts?: Record<string, StoredUserAccount>;
   sessions?: Record<string, StoredUserSession>;
+  chatConversations?: Record<string, AiChatConversation[]>;
 }
 
-const LOCAL_STORE_PATH = path.resolve(process.cwd(), 'data', 'local_store.json');
+const LOCAL_STORE_PATH = process.env.VERCEL
+  ? path.resolve('/tmp', 'coho_local_store.json')
+  : path.resolve(process.cwd(), 'data', 'local_store.json');
 
 let pgPool: Pool | null = null;
 let pgInitialized = false;
+let pgUnavailableUntil = 0;
 let memoryStore: LocalDatabase | null = null;
+
+function markPgUnavailable(err: unknown): void {
+  const msg = err instanceof Error ? err.message : String(err || '');
+  const code = (err as { code?: string })?.code || '';
+  const isConnError =
+    /timeout|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|ENETUNREACH|EHOSTUNREACH|EAI_AGAIN|Connection terminated|socket/i.test(
+      `${msg} ${code}`
+    );
+  if (isConnError || !pgInitialized) {
+    pgUnavailableUntil = Date.now() + 120_000;
+  }
+}
 
 function getTodayIso(): string {
   return new Date().toISOString().slice(0, 10);
@@ -72,6 +89,9 @@ function normalizePgConnectionString(raw: string): string {
 }
 
 function getPgPool(): Pool | null {
+  if (Date.now() < pgUnavailableUntil) {
+    return null;
+  }
   const rawConnStr = process.env.DATABASE_URL?.trim();
   if (!rawConnStr || rawConnStr.includes('YOUR_PASSWORD') || rawConnStr.includes('YOUR_PROJECT')) {
     return null;
@@ -82,10 +102,11 @@ function getPgPool(): Pool | null {
     pgPool = new Pool({
       connectionString: connStr,
       max: 5,
-      connectionTimeoutMillis: 8000,
+      connectionTimeoutMillis: 2500,
       ssl: isLocalhost ? false : { rejectUnauthorized: false },
     });
     pgPool.on('error', (err) => {
+      markPgUnavailable(err);
       console.error('PostgreSQL pool idle error:', err.message);
     });
   }
@@ -106,6 +127,7 @@ function readLocalStore(): LocalDatabase {
         parsed.students = parsed.students || {};
         parsed.accounts = parsed.accounts || {};
         parsed.sessions = parsed.sessions || {};
+        parsed.chatConversations = parsed.chatConversations || {};
         memoryStore = parsed;
         return memoryStore;
       }
@@ -120,6 +142,7 @@ function readLocalStore(): LocalDatabase {
     },
     accounts: {},
     sessions: {},
+    chatConversations: {},
   };
   writeLocalStore(memoryStore);
   return memoryStore;
@@ -222,7 +245,24 @@ async function ensurePgSchemaAndSeed(pool: Pool): Promise<void> {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS ai_chat_conversations (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES user_accounts(id) ON DELETE CASCADE,
+      topic_id TEXT NOT NULL,
+      language_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      messages JSONB NOT NULL DEFAULT '[]'::jsonb,
+      suggestions JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id, expires_at);
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_ai_chat_user ON ai_chat_conversations(user_id, updated_at DESC);
   `);
 
   const countRes = await pool.query('SELECT COUNT(*)::int AS cnt FROM lessons');
@@ -338,6 +378,7 @@ export async function getAllLessons(): Promise<{ lessons: LessonItem[]; storage:
 
       return { lessons, storage: 'supabase' };
     } catch (err) {
+      markPgUnavailable(err);
       console.error('Supabase fetch failed, falling back to local store:', err);
     }
   }
@@ -422,6 +463,7 @@ export async function importCurriculum(
       await insertLessonsPg(pool, nextLessons);
       return { lessons: nextLessons, importedCount: rows.length, storage: 'supabase' };
     } catch (err) {
+      markPgUnavailable(err);
       console.error('Supabase import failed, saving locally:', err);
     }
   }
@@ -443,6 +485,7 @@ export async function resetToSeedCurriculum(): Promise<{ lessons: LessonItem[]; 
       await insertLessonsPg(pool, fresh);
       return { lessons: fresh, storage: 'supabase' };
     } catch (err) {
+      markPgUnavailable(err);
       console.error('Supabase reset failed, falling back to local:', err);
     }
   }
@@ -491,6 +534,7 @@ export async function getStudentProfile(studentId: string): Promise<StudentProfi
         progress,
       };
     } catch (err) {
+      markPgUnavailable(err);
       console.error('Supabase profile fetch failed, using local:', err);
     }
   }
@@ -521,6 +565,7 @@ export async function saveStudentName(studentId: string, displayName: string): P
       );
       return profile;
     } catch (err) {
+      markPgUnavailable(err);
       console.error('Supabase rename failed:', err);
     }
   }
@@ -588,6 +633,7 @@ export async function recordLessonCompletion(params: {
       );
       return profile;
     } catch (err) {
+      markPgUnavailable(err);
       console.error('Supabase progress save failed:', err);
     }
   }
@@ -648,6 +694,7 @@ export async function getLeaderboard(
 
       return { entries, storage: 'supabase' };
     } catch (err) {
+      markPgUnavailable(err);
       console.error('Supabase leaderboard fetch failed, falling back to local:', err);
     }
   }
@@ -823,6 +870,7 @@ export async function registerUserAccount(params: {
       if (err instanceof AuthConflictError) {
         throw err;
       }
+      markPgUnavailable(err);
       console.error('Supabase user registration failed, falling back to local:', err);
     }
   }
@@ -906,6 +954,7 @@ export async function authenticateUserAccount(
       }
       return null;
     } catch (err) {
+      markPgUnavailable(err);
       console.error('Supabase login failed, falling back to local:', err);
     }
   }
@@ -951,6 +1000,7 @@ export async function createUserSession(
       await pool.query('DELETE FROM user_sessions WHERE expires_at <= NOW()');
       return;
     } catch (err) {
+      markPgUnavailable(err);
       console.error('Supabase create session failed, saving locally:', err);
     }
   }
@@ -1007,6 +1057,7 @@ export async function getSessionAccount(
         profile,
       };
     } catch (err) {
+      markPgUnavailable(err);
       console.error('Supabase get session failed, falling back to local:', err);
     }
   }
@@ -1042,6 +1093,7 @@ export async function deleteUserSession(tokenHash: string): Promise<void> {
       await pool.query('DELETE FROM user_sessions WHERE token_hash = $1', [tokenHash]);
       return;
     } catch (err) {
+      markPgUnavailable(err);
       console.error('Supabase delete session failed:', err);
     }
   }
@@ -1052,3 +1104,138 @@ export async function deleteUserSession(tokenHash: string): Promise<void> {
     writeLocalStore(local);
   }
 }
+
+export async function getUserChatConversations(userId: string): Promise<AiChatConversation[]> {
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      await ensurePgSchemaAndSeed(pool);
+      const res = await pool.query(
+        `SELECT id, topic_id, language_id, title, messages, suggestions, created_at, updated_at
+         FROM ai_chat_conversations
+         WHERE user_id = $1
+         ORDER BY updated_at DESC
+         LIMIT 30`,
+        [userId]
+      );
+      return res.rows.map((row) => ({
+        id: String(row.id),
+        topicId: String(row.topic_id) as AiChatConversation['topicId'],
+        languageId: String(row.language_id) as AiChatConversation['languageId'],
+        title: String(row.title),
+        messages: Array.isArray(row.messages) ? row.messages : [],
+        suggestions: Array.isArray(row.suggestions) ? row.suggestions : [],
+        createdAt: new Date(row.created_at).toISOString(),
+        updatedAt: new Date(row.updated_at).toISOString(),
+      }));
+    } catch (err) {
+      markPgUnavailable(err);
+      console.error('Supabase getUserChatConversations failed, falling back to local:', err);
+    }
+  }
+
+  const local = readLocalStore();
+  const list = local.chatConversations?.[userId] || [];
+  return [...list].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, 30);
+}
+
+export async function upsertUserChatConversation(
+  userId: string,
+  conversation: AiChatConversation
+): Promise<AiChatConversation> {
+  const nowIso = new Date().toISOString();
+  const cleanConv: AiChatConversation = {
+    ...conversation,
+    updatedAt: conversation.updatedAt || nowIso,
+    createdAt: conversation.createdAt || nowIso,
+    messages: conversation.messages.slice(-80),
+    suggestions: conversation.suggestions.slice(0, 3),
+  };
+
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      await ensurePgSchemaAndSeed(pool);
+      await pool.query(
+        `INSERT INTO ai_chat_conversations (id, user_id, topic_id, language_id, title, messages, suggestions, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::timestamptz, $9::timestamptz)
+         ON CONFLICT (id) DO UPDATE SET
+           topic_id = EXCLUDED.topic_id,
+           language_id = EXCLUDED.language_id,
+           title = EXCLUDED.title,
+           messages = EXCLUDED.messages,
+           suggestions = EXCLUDED.suggestions,
+           updated_at = EXCLUDED.updated_at
+         WHERE ai_chat_conversations.user_id = $2`,
+        [
+          cleanConv.id,
+          userId,
+          cleanConv.topicId,
+          cleanConv.languageId,
+          cleanConv.title.slice(0, 120),
+          JSON.stringify(cleanConv.messages),
+          JSON.stringify(cleanConv.suggestions),
+          cleanConv.createdAt,
+          cleanConv.updatedAt,
+        ]
+      );
+      return cleanConv;
+    } catch (err) {
+      markPgUnavailable(err);
+      console.error('Supabase upsertUserChatConversation failed, saving locally:', err);
+    }
+  }
+
+  const local = readLocalStore();
+  local.chatConversations = local.chatConversations || {};
+  const existing = (local.chatConversations[userId] || []).filter((c) => c.id !== cleanConv.id);
+  local.chatConversations[userId] = [cleanConv, ...existing].slice(0, 30);
+  writeLocalStore(local);
+  return cleanConv;
+}
+
+export async function deleteUserChatConversation(userId: string, conversationId: string): Promise<void> {
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      await ensurePgSchemaAndSeed(pool);
+      await pool.query('DELETE FROM ai_chat_conversations WHERE id = $1 AND user_id = $2', [
+        conversationId,
+        userId,
+      ]);
+      return;
+    } catch (err) {
+      markPgUnavailable(err);
+      console.error('Supabase deleteUserChatConversation failed:', err);
+    }
+  }
+
+  const local = readLocalStore();
+  if (local.chatConversations?.[userId]) {
+    local.chatConversations[userId] = local.chatConversations[userId].filter(
+      (c) => c.id !== conversationId
+    );
+    writeLocalStore(local);
+  }
+}
+
+export async function clearUserChatConversations(userId: string): Promise<void> {
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      await ensurePgSchemaAndSeed(pool);
+      await pool.query('DELETE FROM ai_chat_conversations WHERE user_id = $1', [userId]);
+      return;
+    } catch (err) {
+      markPgUnavailable(err);
+      console.error('Supabase clearUserChatConversations failed:', err);
+    }
+  }
+
+  const local = readLocalStore();
+  if (local.chatConversations) {
+    local.chatConversations[userId] = [];
+    writeLocalStore(local);
+  }
+}
+

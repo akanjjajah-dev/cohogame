@@ -79,6 +79,17 @@ export const AuthGateView: React.FC<AuthGateViewProps> = ({
         ? '5 màn đầu tiên được chơi thử miễn phí. Từ Màn 6 trở đi, vui lòng đăng ký hoặc đăng nhập để tiếp tục và lưu toàn bộ tiến trình.'
         : 'Đăng ký hoặc đăng nhập để lưu điểm số thang 100, chuỗi ngày học tập và ghi danh lên bảng xếp hạng.';
 
+  const parseAuthResponse = async (res: Response) => {
+    const raw = await res.text();
+    let data: { user?: AuthUser; profile?: StudentProfile; error?: string } | null = null;
+    try {
+      data = raw ? JSON.parse(raw) : null;
+    } catch {
+      data = null;
+    }
+    return data;
+  };
+
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
@@ -104,9 +115,14 @@ export const AuthGateView: React.FC<AuthGateViewProps> = ({
           trialProgress,
         }),
       });
-      const data = await res.json();
-      if (!res.ok || !data.user || !data.profile) {
-        setErrorMessage(data.error || 'Đăng nhập không thành công.');
+      const data = await parseAuthResponse(res);
+      if (!res.ok || !data?.user || !data?.profile) {
+        setErrorMessage(
+          data?.error ||
+            (res.status >= 500
+              ? `Máy chủ tạm thời phản hồi chậm (HTTP ${res.status}). Vui lòng thử lại.`
+              : `Đăng nhập không thành công (HTTP ${res.status}).`)
+        );
         return;
       }
       playTapSound();
@@ -152,9 +168,16 @@ export const AuthGateView: React.FC<AuthGateViewProps> = ({
           trialProgress,
         }),
       });
-      const data = await res.json();
-      if (!res.ok || !data.user || !data.profile) {
-        setErrorMessage(data.error || 'Đăng ký tài khoản không thành công.');
+      const data = await parseAuthResponse(res);
+      if (!res.ok || !data?.user || !data?.profile) {
+        setErrorMessage(
+          data?.error ||
+            (res.status === 404
+              ? 'Không tìm thấy API đăng ký trên máy chủ (HTTP 404).'
+              : res.status >= 500
+                ? `Máy chủ tạm thời phản hồi chậm (HTTP ${res.status}). Vui lòng thử lại.`
+                : `Đăng ký tài khoản không thành công (HTTP ${res.status}).`)
+        );
         return;
       }
       playTapSound();

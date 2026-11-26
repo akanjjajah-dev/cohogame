@@ -3,17 +3,21 @@ import {
   AuthConflictError,
   TrialProgressInput,
   authenticateUserAccount,
+  clearUserChatConversations,
   createUserSession,
+  deleteUserChatConversation,
   deleteUserSession,
   getAllLessons,
   getLeaderboard,
   getSessionAccount,
   getStudentProfile,
+  getUserChatConversations,
   importCurriculum,
   recordLessonCompletion,
   registerUserAccount,
   resetToSeedCurriculum,
   saveStudentName,
+  upsertUserChatConversation,
 } from './db.ts';
 import {
   clearSessionCookie,
@@ -28,7 +32,25 @@ import {
   validateUsernameInput,
   verifyMutationCsrf,
 } from './auth.ts';
-import { AuthUser, ExcelImportRow, StudentProfile } from '../shared/types.ts';
+import {
+  GeminiApiRouteError,
+  evaluatePronunciationAndChat,
+  generateReplySuggestions,
+  generateSpeechAudio,
+  generateTopicStarter,
+  generateChatTurn,
+  isGeminiConfigured,
+  translateMessageToVietnamese,
+} from './geminiChat.ts';
+import { CHAT_LANGUAGE_IDS, CHAT_TOPIC_IDS } from '../shared/chatTopics.ts';
+import {
+  AiChatConversation,
+  AuthUser,
+  ChatLanguageId,
+  ChatTopicId,
+  ExcelImportRow,
+  StudentProfile,
+} from '../shared/types.ts';
 
 interface AuthenticatedRequest extends Request {
   authUser?: AuthUser;
@@ -57,10 +79,66 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
   }
 }
 
+const ALLOWED_AUDIO_MIME_TYPES = new Set([
+  'audio/webm',
+  'audio/ogg',
+  'audio/wav',
+  'audio/mp3',
+  'audio/mpeg',
+  'audio/mp4',
+  'audio/aac',
+]);
+
+const aiRateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function checkAiRateLimit(req: Request, res: Response): boolean {
+  const ip = req.ip || 'unknown';
+  const now = Date.now();
+  const bucket = aiRateBuckets.get(ip);
+  if (!bucket || now >= bucket.resetAt) {
+    aiRateBuckets.set(ip, { count: 1, resetAt: now + 60_000 });
+    return true;
+  }
+  if (bucket.count >= 40) {
+    res.status(429).json({ error: 'Bạn đang gửi quá nhanh. Vui lòng đợi vài giây rồi thử lại.' });
+    return false;
+  }
+  bucket.count += 1;
+  return true;
+}
+
+function parseTopicId(raw: unknown): ChatTopicId {
+  if (typeof raw === 'string' && CHAT_TOPIC_IDS.has(raw as ChatTopicId)) {
+    return raw as ChatTopicId;
+  }
+  return 'daily_life';
+}
+
+function parseLanguageId(raw: unknown): ChatLanguageId {
+  if (typeof raw === 'string' && CHAT_LANGUAGE_IDS.has(raw as ChatLanguageId)) {
+    return raw as ChatLanguageId;
+  }
+  return 'en';
+}
+
+function sanitizeChatHistory(raw: unknown): Array<{ role: 'user' | 'assistant'; text: string }> {
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ role: 'user' | 'assistant'; text: string }> = [];
+  for (const item of raw.slice(-20)) {
+    if (!item || typeof item !== 'object') continue;
+    const role = (item as { role?: unknown }).role;
+    const text = (item as { text?: unknown }).text;
+    if ((role === 'user' || role === 'assistant') && typeof text === 'string' && text.trim()) {
+      out.push({ role, text: text.trim().slice(0, 1200) });
+    }
+  }
+  return out;
+}
+
 export function createApp() {
   const app = express();
   app.set('trust proxy', 1);
-  app.use(express.json({ limit: '5mb' }));
+  app.use(express.json({ limit: '10mb' }));
 
   // CSRF check for all API mutations (POST/PUT/PATCH/DELETE)
   app.use('/api', (req, res, next) => {
@@ -312,6 +390,229 @@ export function createApp() {
     } catch (error) {
       console.error('Error getting leaderboard:', error);
       res.status(500).json({ error: 'Không thể tải bảng xếp hạng.' });
+    }
+  });
+
+  app.get('/api/ai-chat/status', (_req, res) => {
+    res.json({
+      ok: true,
+      online: true,
+      aiConfigured: isGeminiConfigured(),
+    });
+  });
+
+  app.post('/api/ai-chat/start', async (req, res) => {
+    if (!checkAiRateLimit(req, res)) return;
+    try {
+      const topicId = parseTopicId(req.body?.topicId);
+      const languageId = parseLanguageId(req.body?.languageId);
+      const { lessons } = languageId === 'kho' ? await getAllLessons() : { lessons: [] };
+      const starter = await generateTopicStarter(topicId, languageId, lessons);
+      return res.json(starter);
+    } catch (error) {
+      if (error instanceof GeminiApiRouteError) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      console.error('Error starting AI chat:', error);
+      return res.status(500).json({ error: 'Không thể bắt đầu cuộc hội thoại AI.' });
+    }
+  });
+
+  app.post('/api/ai-chat/message', async (req, res) => {
+    if (!checkAiRateLimit(req, res)) return;
+    try {
+      const topicId = parseTopicId(req.body?.topicId);
+      const languageId = parseLanguageId(req.body?.languageId);
+      const rawMessage = req.body?.message;
+      if (typeof rawMessage !== 'string' || rawMessage.trim().length === 0) {
+        return res.status(400).json({ error: 'Vui lòng nhập nội dung tin nhắn.' });
+      }
+      if (rawMessage.length > 1500) {
+        return res.status(400).json({ error: 'Tin nhắn quá dài (tối đa 1500 ký tự).' });
+      }
+
+      const history = sanitizeChatHistory(req.body?.history);
+      const { lessons } = languageId === 'kho' ? await getAllLessons() : { lessons: [] };
+      const result = await generateChatTurn({
+        topicId,
+        languageId,
+        userMessage: rawMessage.trim(),
+        history,
+        lessons,
+      });
+      return res.json(result);
+    } catch (error) {
+      if (error instanceof GeminiApiRouteError) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      console.error('Error generating AI reply:', error);
+      return res.status(500).json({ error: 'Không thể nhận phản hồi từ AI lúc này.' });
+    }
+  });
+
+  app.post('/api/ai-chat/translate', async (req, res) => {
+    if (!checkAiRateLimit(req, res)) return;
+    try {
+      const text = req.body?.text;
+      const languageId = parseLanguageId(req.body?.languageId);
+      if (typeof text !== 'string' || !text.trim()) {
+        return res.status(400).json({ error: 'Thiếu nội dung cần dịch.' });
+      }
+      const translation = await translateMessageToVietnamese(text.trim().slice(0, 2000), languageId);
+      return res.json({ translation });
+    } catch (error) {
+      if (error instanceof GeminiApiRouteError) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      console.error('Error translating AI message:', error);
+      return res.status(500).json({ error: 'Không thể dịch tin nhắn lúc này.' });
+    }
+  });
+
+  app.post('/api/ai-chat/suggestions', async (req, res) => {
+    if (!checkAiRateLimit(req, res)) return;
+    try {
+      const topicId = parseTopicId(req.body?.topicId);
+      const languageId = parseLanguageId(req.body?.languageId);
+      const history = sanitizeChatHistory(req.body?.history);
+      const { lessons } = languageId === 'kho' ? await getAllLessons() : { lessons: [] };
+      const suggestions = await generateReplySuggestions({
+        topicId,
+        languageId,
+        history,
+        lessons,
+      });
+      return res.json({ suggestions });
+    } catch (error) {
+      if (error instanceof GeminiApiRouteError) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      console.error('Error generating suggestions:', error);
+      return res.status(500).json({ error: 'Không thể tạo gợi ý câu trả lời lúc này.' });
+    }
+  });
+
+  app.post('/api/ai-chat/pronunciation', async (req, res) => {
+    if (!checkAiRateLimit(req, res)) return;
+    try {
+      const topicId = parseTopicId(req.body?.topicId);
+      const languageId = parseLanguageId(req.body?.languageId);
+      const history = sanitizeChatHistory(req.body?.history);
+      const rawAudioBase64 = typeof req.body?.audioBase64 === 'string' ? req.body.audioBase64.trim() : '';
+      const rawMimeType =
+        typeof req.body?.mimeType === 'string' ? req.body.mimeType.split(';')[0].trim().toLowerCase() : '';
+      const browserTranscript =
+        typeof req.body?.browserTranscript === 'string' ? req.body.browserTranscript.trim().slice(0, 1200) : '';
+
+      if (!rawAudioBase64 && !browserTranscript) {
+        return res.status(400).json({ error: 'Không có dữ liệu âm thanh hoặc giọng nói để phân tích.' });
+      }
+      if (rawAudioBase64) {
+        if (rawAudioBase64.length > 8_000_000) {
+          return res.status(400).json({ error: 'Đoạn ghi âm quá dài. Vui lòng nói ngắn gọn hơn (dưới 45 giây).' });
+        }
+        if (!ALLOWED_AUDIO_MIME_TYPES.has(rawMimeType)) {
+          return res.status(400).json({ error: 'Định dạng âm thanh không được hỗ trợ.' });
+        }
+      }
+
+      const { lessons } = languageId === 'kho' ? await getAllLessons() : { lessons: [] };
+      const result = await evaluatePronunciationAndChat({
+        topicId,
+        languageId,
+        history,
+        lessons,
+        audioBase64: rawAudioBase64 || undefined,
+        mimeType: rawAudioBase64 ? rawMimeType : undefined,
+        browserTranscript: browserTranscript || undefined,
+      });
+      return res.json(result);
+    } catch (error) {
+      if (error instanceof GeminiApiRouteError) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      console.error('Error evaluating pronunciation:', error);
+      return res.status(500).json({ error: 'Không thể phân tích phát âm lúc này.' });
+    }
+  });
+
+  app.post('/api/ai-chat/tts', async (req, res) => {
+    if (!checkAiRateLimit(req, res)) return;
+    try {
+      const text = req.body?.text;
+      const languageId = parseLanguageId(req.body?.languageId);
+      if (typeof text !== 'string' || !text.trim()) {
+        return res.status(400).json({ error: 'Thiếu văn bản để phát âm thanh.' });
+      }
+      const audio = await generateSpeechAudio(text.trim(), languageId);
+      return res.json(audio);
+    } catch (error) {
+      if (error instanceof GeminiApiRouteError) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      console.error('Error generating TTS audio:', error);
+      return res.status(500).json({ error: 'Không thể tạo âm thanh đọc câu trả lời.' });
+    }
+  });
+
+  app.get('/api/ai-chat/conversations', requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const conversations = await getUserChatConversations(req.authUser!.id);
+      return res.json({ conversations });
+    } catch (error) {
+      console.error('Error loading chat conversations:', error);
+      return res.status(500).json({ error: 'Không thể tải lịch sử hội thoại.' });
+    }
+  });
+
+  app.put('/api/ai-chat/conversations/:id', requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const convId = req.params.id?.trim();
+      if (!convId || convId.length > 100) {
+        return res.status(400).json({ error: 'Mã cuộc trò chuyện không hợp lệ.' });
+      }
+      const body = req.body as Partial<AiChatConversation>;
+      if (!body || !Array.isArray(body.messages)) {
+        return res.status(400).json({ error: 'Dữ liệu cuộc trò chuyện không hợp lệ.' });
+      }
+      const saved = await upsertUserChatConversation(req.authUser!.id, {
+        id: convId,
+        topicId: parseTopicId(body.topicId),
+        languageId: parseLanguageId(body.languageId),
+        title: typeof body.title === 'string' && body.title.trim() ? body.title.trim() : 'Hội thoại AI',
+        messages: body.messages,
+        suggestions: Array.isArray(body.suggestions) ? body.suggestions : [],
+        createdAt: typeof body.createdAt === 'string' ? body.createdAt : new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+      return res.json({ conversation: saved });
+    } catch (error) {
+      console.error('Error saving chat conversation:', error);
+      return res.status(500).json({ error: 'Không thể lưu lịch sử hội thoại.' });
+    }
+  });
+
+  app.delete('/api/ai-chat/conversations/:id', requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const convId = req.params.id?.trim();
+      if (!convId) {
+        return res.status(400).json({ error: 'Thiếu mã cuộc trò chuyện.' });
+      }
+      await deleteUserChatConversation(req.authUser!.id, convId);
+      return res.json({ ok: true });
+    } catch (error) {
+      console.error('Error deleting chat conversation:', error);
+      return res.status(500).json({ error: 'Không thể xóa cuộc trò chuyện.' });
+    }
+  });
+
+  app.delete('/api/ai-chat/conversations', requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      await clearUserChatConversations(req.authUser!.id);
+      return res.json({ ok: true });
+    } catch (error) {
+      console.error('Error clearing chat conversations:', error);
+      return res.status(500).json({ error: 'Không thể xóa lịch sử trò chuyện.' });
     }
   });
 

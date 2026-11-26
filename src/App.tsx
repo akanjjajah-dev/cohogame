@@ -7,6 +7,7 @@ import {
   Heart,
   LogIn,
   LogOut,
+  MessageSquareText,
   Sparkles,
   Trophy,
   User,
@@ -21,6 +22,7 @@ import { AuthUser, LessonItem, StudentProfile } from './shared/types';
 import { apiFetch } from './lib/api';
 import { getSoundMuted, setSoundMuted, playTapSound } from './lib/audio';
 import { AuthGateView, TrialProgressSyncItem } from './components/AuthGateView';
+import { AiChatView } from './components/AiChatView';
 import { LearningPathView } from './components/LearningPathView';
 import { LookupView } from './components/LookupView';
 import { AlphabetView } from './components/AlphabetView';
@@ -29,7 +31,7 @@ import { LeaderboardView } from './components/LeaderboardView';
 import { ExcelManagerView } from './components/ExcelManagerView';
 import { LessonPlayer } from './components/LessonPlayer';
 
-type NavTab = 'learn' | 'lookup' | 'alphabet' | 'skills' | 'leaderboard' | 'excel';
+type NavTab = 'learn' | 'ai-chat' | 'lookup' | 'alphabet' | 'skills' | 'leaderboard' | 'excel';
 
 const FREE_TRIAL_LESSON_LIMIT = 5;
 const GUEST_TRIAL_STORAGE_KEY = 'coho_guest_trial_profile_v1';
@@ -374,10 +376,11 @@ export default function App() {
     showInMobileBottom?: boolean;
     icon: React.ComponentType<{ className?: string }>;
   }[] = [
-    { id: 'learn', label: 'Học tập', showInMobileBottom: true, icon: Compass },
+    { id: 'learn', label: 'Học tập', mobileLabel: 'Học', showInMobileBottom: true, icon: Compass },
+    { id: 'ai-chat', label: 'Chatbot AI', mobileLabel: 'Chat AI', showInMobileBottom: true, icon: MessageSquareText },
     { id: 'lookup', label: 'Tra từ 2 chiều', mobileLabel: 'Tra từ', showInMobileBottom: true, icon: Search },
     { id: 'alphabet', label: 'Chữ cái', showInMobileBottom: true, icon: BookA },
-    { id: 'skills', label: '4 Kỹ năng', showInMobileBottom: true, icon: Sparkles },
+    { id: 'skills', label: '4 Kỹ năng', mobileLabel: 'Kỹ năng', showInMobileBottom: true, icon: Sparkles },
     { id: 'leaderboard', label: 'Bảng xếp hạng', mobileLabel: 'Xếp hạng', showInMobileBottom: false, icon: Trophy },
     { id: 'excel', label: 'Dữ liệu Excel', mobileLabel: 'Excel', showInMobileBottom: true, icon: FileSpreadsheet },
   ];
@@ -609,6 +612,9 @@ export default function App() {
                   onSelectLesson={handleSelectLesson}
                 />
               )}
+              {activeTab === 'ai-chat' && (
+                <AiChatView isAuthenticated={Boolean(authUser)} userId={authUser?.id} />
+              )}
               {activeTab === 'lookup' && <LookupView lessons={lessons} />}
               {activeTab === 'alphabet' && <AlphabetView />}
               {activeTab === 'skills' && (
@@ -735,7 +741,7 @@ export default function App() {
       {/* Mobile Fixed Bottom Navigation Bar (<= 8% viewport height) */}
       <nav
         aria-label="Điều hướng di động"
-        className="lg:hidden fixed bottom-0 left-0 right-0 z-30 h-16 bg-white/95 backdrop-blur-md border-t border-stone-200 grid grid-cols-5 items-center px-1"
+        className="lg:hidden fixed bottom-0 left-0 right-0 z-30 h-16 bg-white/95 backdrop-blur-md border-t border-stone-200 grid grid-cols-6 items-center px-1"
       >
         {navItems
           .filter((item) => item.showInMobileBottom)
@@ -755,7 +761,7 @@ export default function App() {
                 }`}
               >
                 <Icon className="w-5 h-5" />
-                <span className="text-[11px] leading-none whitespace-nowrap">
+                <span className="text-[10px] sm:text-[11px] leading-none whitespace-nowrap">
                   {item.mobileLabel || item.label}
                 </span>
               </button>
